@@ -386,7 +386,6 @@ def _render_pivot_table(result, bulan_cols, KEYS):
     total_agg = result.groupby(KEYS).agg(
         All_Stock=("Stock Cabang", "sum"),
         All_SO=("SO WMA", "sum"),
-        All_Suggested_PO=("Suggested PO", "sum"),
     ).reset_index()
 
     all_abc_input = result.groupby(KEYS, as_index=False).agg({"SO WMA": "sum"})
@@ -413,7 +412,7 @@ def _render_pivot_table(result, bulan_cols, KEYS):
     pivot = pd.merge(pivot, total_agg, on=KEYS, how="left")
     pivot = pd.merge(pivot, all_classified[KEYS + ["All_Log", "All_Avg Log", "All_Ratio"]], on=KEYS, how="left")
 
-    final_summary = ["All_Stock", "All_SO", "All_Add_Stock", "All_Suggested_PO",
+    final_summary = ["All_Stock", "All_SO", "All_Add_Stock",
                      "All_Log", "All_Avg Log", "All_Ratio", "All_Kategori ABC All", "All_Restock 1 Bulan"]
     final_cols = KEYS + existing_ordered + final_summary
     df_style = pivot[[c for c in final_cols if c in pivot.columns]].copy()
