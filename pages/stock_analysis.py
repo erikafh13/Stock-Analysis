@@ -229,10 +229,10 @@ def _run_stock_analysis(penjualan, produk_ref, df_stock, end_date):
 
         full_data["Status Stock"] = full_data.apply(get_status_stock, axis=1)
 
-        # ── Add Stock (Vectorized — FIX performa) ─────────────────────────────
+        # ── Add Stock (Vectorized) ─────────────────────────────────────────────
         full_data["Add Stock"] = calculate_add_stock(full_data, KAT_COL, "Min Stock", "Stock Cabang")
 
-        # Merge data pendukung
+        # ── Suggested PO per Cabang ────────────────────────────────────────────
         stock_sby   = stock_melted[stock_melted["City"] == "SURABAYA"][["No. Barang", "Stock"]].rename(columns={"Stock": "Stock Surabaya"})
         stock_total = stock_melted.groupby("No. Barang")["Stock"].sum().reset_index().rename(columns={"Stock": "Stock Total"})
         total_req   = full_data.groupby("No. Barang")["Add Stock"].sum().reset_index(name="Total Add Stock All")
@@ -242,7 +242,6 @@ def _run_stock_analysis(penjualan, produk_ref, df_stock, end_date):
         full_data = full_data.merge(total_req,   on="No. Barang", how="left")
         full_data.fillna(0, inplace=True)
 
-        # ── Suggested PO ──────────────────────────────────────────────────────
         full_data["Suggested PO"] = full_data.apply(
             lambda r: hitung_po_cabang_baru(
                 r["Stock Surabaya"], r["Stock Cabang"], r["Stock Total"],
@@ -254,7 +253,7 @@ def _run_stock_analysis(penjualan, produk_ref, df_stock, end_date):
         # ── Pembulatan ─────────────────────────────────────────────────────────
         int_cols = [
             "Stock Cabang", "Min Stock", "Max Stock", "Add Stock",
-            "Total Add Stock All", "Suggested PO", "Stock Surabaya", "Stock Total",
+            "Suggested PO", "Stock Surabaya", "Stock Total", "Total Add Stock All",
             "SO WMA", "SO Mean", "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3",
         ] + bulan_columns_renamed
         for col in int_cols:
