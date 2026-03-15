@@ -26,7 +26,7 @@ from .analysis import (
     calculate_min_stock,
     calculate_max_stock,
     calculate_add_stock,
-    hitung_po_cabang_baru,
+    calculate_suggested_po,
     get_status_stock,
     melt_stock_by_city,
     highlight_kategori_abc_log,
