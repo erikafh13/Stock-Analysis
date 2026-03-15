@@ -215,26 +215,50 @@ def calculate_add_stock(df: pd.DataFrame, kategori_col: str,
     return pd.Series(add_stock.astype(int), index=df.index)
 
 
-# ── PO Cabang ──────────────────────────────────────────────────────────────────
-def hitung_po_cabang_baru(stock_surabaya, stock_cabang, stock_total,
-                          total_add_stock_all, so_cabang, add_stock_cabang) -> int:
-    try:
-        if stock_surabaya < add_stock_cabang:
-            return 0
-        kebutuhan_30_hari = so_cabang
-        kondisi_3 = stock_cabang < kebutuhan_30_hari
-        kondisi_2 = stock_total < total_add_stock_all
-        if kondisi_2 and kondisi_3:
-            if stock_total > 0:
-                ideal_po = ((stock_cabang + add_stock_cabang) / stock_total * stock_surabaya) - stock_cabang
-                return max(0, round(ideal_po))
-            return 0
-        return round(add_stock_cabang)
-    except (ZeroDivisionError, TypeError):
-        return 0
+# ── Suggested PO per Cabang (Proporsional) ────────────────────────────────────
+def calculate_suggested_po(df: pd.DataFrame) -> pd.Series:
+    """
+    Hitung Suggested PO per cabang secara vectorized dengan logika proporsional.
+
+    Logika:
+    - Surabaya adalah gudang pusat → tidak menerima kiriman dari dirinya sendiri
+    - Jika Total Add Stock non-Surabaya = 0 → semua PO = 0
+    - Hitung porsi tiap cabang: Add Stock Cabang / Total Add Stock non-Surabaya
+    - Jika Stock Surabaya >= Total Add Stock non-Surabaya:
+        → Tiap cabang dapat Add Stock penuh
+    - Jika Stock Surabaya < Total Add Stock non-Surabaya:
+        → Tiap cabang dapat CEIL(porsi × Stock Surabaya)
+    """
+    result = pd.Series(0, index=df.index, dtype=int)
+
+    for no_barang, group in df.groupby("No. Barang"):
+        # Pisahkan Surabaya (sumber) dari cabang penerima
+        mask_sby    = group["City"] == "SURABAYA"
+        mask_cabang = ~mask_sby
+
+        stock_sby_val = group.loc[mask_sby, "Stock Surabaya"].sum()
+        add_cabang    = group.loc[mask_cabang, "Add Stock"]
+        total_add     = add_cabang.sum()
+
+        # Jika tidak ada kebutuhan sama sekali → semua 0
+        if total_add == 0:
+            continue
+
+        if stock_sby_val >= total_add:
+            # Stok Surabaya cukup → tiap cabang dapat Add Stock penuh
+            result.loc[add_cabang.index] = add_cabang.values
+        else:
+            # Stok Surabaya tidak cukup → bagi proporsional
+            porsi = add_cabang / total_add
+            po_proporsional = np.ceil(porsi * stock_sby_val).astype(int)
+            result.loc[add_cabang.index] = po_proporsional.values
+
+        # Surabaya sebagai cabang → selalu 0 (tidak kirim ke diri sendiri)
+        result.loc[group.loc[mask_sby].index] = 0
+
+    return result
 
 
-# ── Status Stock ───────────────────────────────────────────────────────────────
 def get_status_stock(row) -> str:
     kategori = row.get("Kategori ABC (Log-Benchmark - WMA)", "")
     if kategori == "F":
