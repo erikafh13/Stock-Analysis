@@ -351,13 +351,23 @@ def _render_table(result, bulan_cols, sel_abc, sel_status):
 
     # Unduh
     st.header("💾 Unduh Hasil Analisis Stock")
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    output_stock = BytesIO()
+    with pd.ExcelWriter(output_stock, engine="openpyxl") as writer:
+        # Sheet 1: Tabel pivot gabungan semua kota (df_style dari _render_pivot_table)
+        # Karena df_style ada di dalam _render_pivot_table, kita simpan ke session state
+        if "stock_pivot_df" in st.session_state and not st.session_state.stock_pivot_df.empty:
+            st.session_state.stock_pivot_df.to_excel(writer, sheet_name="All Cities Pivot", index=False)
+        # Sheet 2: Data filtered lengkap
         result.to_excel(writer, sheet_name="Filtered Data", index=False)
+        # Sheet per kota
+        for city in sorted(result["City"].unique()):
+            city_df = result[result["City"] == city]
+            if not city_df.empty:
+                city_df.to_excel(writer, sheet_name=city[:31], index=False)
     st.download_button(
         "📥 Unduh Hasil Analisis Stock (Excel)",
-        data=output.getvalue(),
-        file_name="Hasil_Analisis_Stock.xlsx",
+        data=output_stock.getvalue(),
+        file_name=f"Hasil_Analisis_Stock.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -442,6 +452,9 @@ def _render_pivot_table(result, bulan_cols, KEYS):
     df_style[numeric_cols_to_format] = df_style[numeric_cols_to_format].fillna(0).astype(int)
     df_style[float_cols_to_format]   = df_style[float_cols_to_format].fillna(0)
     df_style[object_cols_to_format]  = df_style[object_cols_to_format].fillna("-")
+
+    # Simpan ke session state agar bisa dipakai di tombol download
+    st.session_state.stock_pivot_df = df_style.copy()
 
     column_config_stock = {}
     for col in numeric_cols_to_format: column_config_stock[col] = st.column_config.NumberColumn(format="%.0f")
