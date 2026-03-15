@@ -43,6 +43,7 @@ _defaults = {
     "abc_analysis_result":  None,
     "bulan_columns_stock":  [],
     "df_portal_analyzed":   __import__("pandas").DataFrame(),
+    "stock_pivot_df":       __import__("pandas").DataFrame(),
 }
 for key, default in _defaults.items():
     if key not in st.session_state:
