@@ -21,7 +21,7 @@ from utils import (
     calculate_min_stock,
     calculate_max_stock,
     calculate_add_stock,
-    hitung_po_cabang_baru,
+    calculate_suggested_po,
     get_status_stock,
     melt_stock_by_city,
     highlight_kategori_abc_log,
@@ -232,28 +232,19 @@ def _run_stock_analysis(penjualan, produk_ref, df_stock, end_date):
         # ── Add Stock (Vectorized) ─────────────────────────────────────────────
         full_data["Add Stock"] = calculate_add_stock(full_data, KAT_COL, "Min Stock", "Stock Cabang")
 
-        # ── Suggested PO per Cabang ────────────────────────────────────────────
-        stock_sby   = stock_melted[stock_melted["City"] == "SURABAYA"][["No. Barang", "Stock"]].rename(columns={"Stock": "Stock Surabaya"})
-        stock_total = stock_melted.groupby("No. Barang")["Stock"].sum().reset_index().rename(columns={"Stock": "Stock Total"})
-        total_req   = full_data.groupby("No. Barang")["Add Stock"].sum().reset_index(name="Total Add Stock All")
+        # ── Suggested PO per Cabang (Proporsional) ────────────────────────────
+        # Merge Stock Surabaya sebagai sumber distribusi
+        stock_sby = stock_melted[stock_melted["City"] == "SURABAYA"][["No. Barang", "Stock"]].rename(columns={"Stock": "Stock Surabaya"})
+        full_data = full_data.merge(stock_sby, on="No. Barang", how="left")
+        full_data["Stock Surabaya"] = full_data["Stock Surabaya"].fillna(0)
 
-        full_data = full_data.merge(stock_sby,   on="No. Barang", how="left")
-        full_data = full_data.merge(stock_total, on="No. Barang", how="left")
-        full_data = full_data.merge(total_req,   on="No. Barang", how="left")
-        full_data.fillna(0, inplace=True)
-
-        full_data["Suggested PO"] = full_data.apply(
-            lambda r: hitung_po_cabang_baru(
-                r["Stock Surabaya"], r["Stock Cabang"], r["Stock Total"],
-                r["Total Add Stock All"], r["SO WMA"], r["Add Stock"],
-            ),
-            axis=1,
-        )
+        # Hitung Suggested PO proporsional (vectorized per No. Barang)
+        full_data["Suggested PO"] = calculate_suggested_po(full_data)
 
         # ── Pembulatan ─────────────────────────────────────────────────────────
         int_cols = [
             "Stock Cabang", "Min Stock", "Max Stock", "Add Stock",
-            "Suggested PO", "Stock Surabaya", "Stock Total", "Total Add Stock All",
+            "Suggested PO", "Stock Surabaya",
             "SO WMA", "SO Mean", "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3",
         ] + bulan_columns_renamed
         for col in int_cols:
