@@ -364,6 +364,7 @@ def _render_table(result, bulan_cols, sel_abc, sel_status):
 
 def _render_pivot_table(result, bulan_cols, KEYS):
     from utils import classify_abc_log_benchmark, get_days_multiplier
+
     pivot_cols = (
         bulan_cols
         + ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
@@ -371,15 +372,15 @@ def _render_pivot_table(result, bulan_cols, KEYS):
         + ["Log (10) WMA", "Avg Log WMA", "Ratio Log WMA", "Kategori ABC (Log-Benchmark - WMA)"]
         + ["Min Stock", "Max Stock", "Stock Cabang", "Status Stock", "Add Stock", "Suggested PO"]
     )
-    pivot_cols_existing = [c for c in pivot_cols if c in result.columns]
-    pivot = result.pivot_table(index=KEYS, columns="City", values=pivot_cols_existing, aggfunc="first")
-    pivot.columns = [f"{lv1}_{lv0}" for lv0, lv1 in pivot.columns]
-    pivot.reset_index(inplace=True)
+    pivot_cols_existing = [col for col in pivot_cols if col in result.columns]
+    pivot_result = result.pivot_table(index=KEYS, columns="City", values=pivot_cols_existing, aggfunc="first")
+    pivot_result.columns = [f"{level1}_{level0}" for level0, level1 in pivot_result.columns]
+    pivot_result.reset_index(inplace=True)
 
     cities = sorted(result["City"].unique())
     metric_order = pivot_cols
-    ordered = [f"{city}_{m}" for city in cities for m in metric_order]
-    existing_ordered = [c for c in ordered if c in pivot.columns]
+    ordered_city_cols = [f"{city}_{metric}" for city in cities for metric in metric_order]
+    existing_ordered_cols = [col for col in ordered_city_cols if col in pivot_result.columns]
 
     # ALL summary
     total_agg = result.groupby(KEYS).agg(
@@ -387,48 +388,66 @@ def _render_pivot_table(result, bulan_cols, KEYS):
         All_SO=("SO WMA", "sum"),
     ).reset_index()
 
-    all_abc_input = result.groupby(KEYS, as_index=False).agg({"SO WMA": "sum"})
-    all_abc_input.rename(columns={"SO WMA": "Total Kuantitas"}, inplace=True)
-    all_abc_input["City"] = "ALL"
-    all_classified = classify_abc_log_benchmark(all_abc_input, metric_col="Total Kuantitas")
+    # Pastikan tidak ada spasi aneh
+    result.columns = result.columns.str.strip()
+
+    # Hitung DNA ABC lengkap untuk kategori ALL
+    all_sales_for_abc = result.groupby(KEYS, as_index=False).agg({"SO WMA": "sum"})
+    all_sales_for_abc.rename(columns={"SO WMA": "Total Kuantitas"}, inplace=True)
+    all_sales_for_abc["City"] = "ALL"
+
+    all_classified = classify_abc_log_benchmark(all_sales_for_abc, metric_col="Total Kuantitas")
     all_classified.rename(columns={
-        "Log (10) Total Kuantitas":                         "All_Log",
-        "Avg Log Total Kuantitas":                          "All_Avg Log",
-        "Ratio Log Total Kuantitas":                        "All_Ratio",
-        "Kategori ABC (Log-Benchmark - Total Kuantitas)":   "All_Kategori ABC All",
+        "Log (10) Total Kuantitas":                       "All_Log",
+        "Avg Log Total Kuantitas":                        "All_Avg Log",
+        "Ratio Log Total Kuantitas":                      "All_Ratio",
+        "Kategori ABC (Log-Benchmark - Total Kuantitas)": "All_Kategori ABC All",
     }, inplace=True)
 
+    # Merge kategori ke total_agg lalu hitung All_Add_Stock
     total_agg = pd.merge(total_agg, all_classified[KEYS + ["All_Kategori ABC All"]], on=KEYS, how="left")
 
-    def _calc_all_add(row):
-        if row["All_Kategori ABC All"] == "F": return 0
+    def calc_all_add_stock(row):
+        if row["All_Kategori ABC All"] == "F":
+            return 0
         mult = get_days_multiplier(row["All_Kategori ABC All"])
         return max(0, math.ceil(row["All_SO"] * mult) - row["All_Stock"])
 
-    total_agg["All_Add_Stock"]     = total_agg.apply(_calc_all_add, axis=1)
+    total_agg["All_Add_Stock"]       = total_agg.apply(calc_all_add_stock, axis=1)
     total_agg["All_Restock 1 Bulan"] = np.where(total_agg["All_Stock"] < total_agg["All_SO"], "PO", "NO")
 
-    pivot = pd.merge(pivot, total_agg, on=KEYS, how="left")
-    pivot = pd.merge(pivot, all_classified[KEYS + ["All_Log", "All_Avg Log", "All_Ratio"]], on=KEYS, how="left")
+    pivot_result = pd.merge(pivot_result, total_agg, on=KEYS, how="left")
+    pivot_result = pd.merge(pivot_result, all_classified[KEYS + ["All_Log", "All_Avg Log", "All_Ratio"]], on=KEYS, how="left")
 
-    final_summary = ["All_Stock", "All_SO", "All_Add_Stock",
-                     "All_Log", "All_Avg Log", "All_Ratio", "All_Kategori ABC All", "All_Restock 1 Bulan"]
-    final_cols = KEYS + existing_ordered + final_summary
-    df_style = pivot[[c for c in final_cols if c in pivot.columns]].copy()
+    # Daftarkan kolom ALL di summary
+    final_summary_cols = [
+        "All_Stock", "All_SO", "All_Add_Stock",
+        "All_Log", "All_Avg Log", "All_Ratio", "All_Kategori ABC All", "All_Restock 1 Bulan"
+    ]
+    final_display_cols = KEYS + existing_ordered_cols + final_summary_cols
+    df_style = pivot_result[[c for c in final_display_cols if c in pivot_result.columns]].copy()
 
-    num_cols   = [c for c in df_style.columns if c not in KEYS and pd.api.types.is_numeric_dtype(df_style[c])
-                  and not any(x in c for x in ["Ratio", "Log", "Avg Log"])]
-    float_cols = [c for c in df_style.columns if c not in KEYS and any(x in c for x in ["Ratio", "Log", "Avg Log"])]
-    obj_cols   = [c for c in df_style.columns if c not in KEYS and c not in num_cols and c not in float_cols]
+    numeric_cols_to_format = []
+    float_cols_to_format   = []
+    object_cols_to_format  = []
+    for col in df_style.columns:
+        if col not in KEYS:
+            if any(x in col for x in ["Ratio", "Log", "Avg Log"]):
+                float_cols_to_format.append(col)
+            elif pd.api.types.is_numeric_dtype(df_style[col]):
+                numeric_cols_to_format.append(col)
+            else:
+                object_cols_to_format.append(col)
 
-    df_style[num_cols]   = df_style[num_cols].fillna(0).astype(int)
-    df_style[float_cols] = df_style[float_cols].fillna(0)
-    df_style[obj_cols]   = df_style[obj_cols].fillna("-")
+    df_style[numeric_cols_to_format] = df_style[numeric_cols_to_format].fillna(0).astype(int)
+    df_style[float_cols_to_format]   = df_style[float_cols_to_format].fillna(0)
+    df_style[object_cols_to_format]  = df_style[object_cols_to_format].fillna("-")
 
-    col_cfg = {}
-    for c in num_cols:   col_cfg[c] = st.column_config.NumberColumn(format="%.0f")
-    for c in float_cols: col_cfg[c] = st.column_config.NumberColumn(format="%.2f")
-    st.dataframe(df_style, column_config=col_cfg, use_container_width=True)
+    column_config_stock = {}
+    for col in numeric_cols_to_format: column_config_stock[col] = st.column_config.NumberColumn(format="%.0f")
+    for col in float_cols_to_format:   column_config_stock[col] = st.column_config.NumberColumn(format="%.2f")
+
+    st.dataframe(df_style, column_config=column_config_stock, use_container_width=True)
 
 
 def _render_dashboard(result):
