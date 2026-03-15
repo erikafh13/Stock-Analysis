@@ -367,7 +367,7 @@ def _render_table(result, bulan_cols, sel_abc, sel_status):
     st.download_button(
         "📥 Unduh Hasil Analisis Stock (Excel)",
         data=output_stock.getvalue(),
-        file_name=f"Hasil_Analisis_Stock.xlsx",
+        file_name=f"Hasil_Analisis_Stock_{start_date}_sd_{end_date}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
