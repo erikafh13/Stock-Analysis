@@ -27,6 +27,10 @@ from .analysis import (
     calculate_max_stock,
     calculate_add_stock,
     calculate_suggested_po,
+    # V2
+    calculate_add_stock_v2,
+    calculate_suggested_po_v2,
+    calculate_all_summary_v2,
     get_status_stock,
     melt_stock_by_city,
     highlight_kategori_abc_log,
