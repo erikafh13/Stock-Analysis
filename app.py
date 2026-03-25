@@ -3,23 +3,22 @@ app.py  ←  Entry point utama aplikasi Streamlit.
 
 Struktur project:
     stock_app/
-    ├── app.py                  ← file ini (jalankan: streamlit run app.py)
+    ├── app.py
     ├── utils/
     │   ├── __init__.py
-    │   ├── gdrive.py           ← koneksi & operasi Google Drive
-    │   └── analysis.py         ← semua fungsi kalkulasi & analisis
+    │   ├── gdrive.py
+    │   └── analysis.py
     └── pages/
-        ├── input_data.py       ← halaman Input Data
-        ├── stock_analysis.py   ← halaman Hasil Analisa Stock
-        └── abc_analysis.py     ← halaman Hasil Analisa ABC
+        ├── input_data.py
+        ├── stock_analysis.py      ← Logika Lama
+        ├── stock_analysis_v2.py   ← Logika Baru (V2)
+        └── abc_analysis.py
 """
 
 import streamlit as st
 
-# ── Konfigurasi Halaman ────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="Analisis Stock & ABC")
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.image(
     "https://eq-cdn.equiti-me.com/website/images/What_does_a_stock_split_mean.2e16d0ba.fill-1600x900.jpg",
     use_container_width=True,
@@ -28,35 +27,44 @@ st.sidebar.title("Analisis Stock dan ABC")
 
 page = st.sidebar.radio(
     "Menu Navigasi:",
-    ("Input Data", "Hasil Analisa Stock", "Hasil Analisa ABC", "Hasil Analisis Margin"),
+    (
+        "Input Data",
+        "Hasil Analisa Stock",
+        "Hasil Analisa Stock V2",
+        "Hasil Analisa ABC",
+        "Hasil Analisis Margin",
+    ),
     help="Pilih halaman untuk ditampilkan.",
 )
 st.sidebar.markdown("---")
 
 # ── Inisialisasi Session State ─────────────────────────────────────────────────
+import pandas as pd
 _defaults = {
-    "df_penjualan":         __import__("pandas").DataFrame(),
-    "produk_ref":           __import__("pandas").DataFrame(),
-    "df_stock":             __import__("pandas").DataFrame(),
-    "stock_filename":       "",
+    "df_penjualan":          pd.DataFrame(),
+    "produk_ref":            pd.DataFrame(),
+    "df_stock":              pd.DataFrame(),
+    "stock_filename":        "",
     "stock_analysis_result": None,
-    "abc_analysis_result":  None,
-    "bulan_columns_stock":  [],
-    "df_portal_analyzed":   __import__("pandas").DataFrame(),
-    "stock_pivot_df":       __import__("pandas").DataFrame(),
+    "abc_analysis_result":   None,
+    "bulan_columns_stock":   [],
+    "df_portal_analyzed":    pd.DataFrame(),
+    "stock_pivot_df":        pd.DataFrame(),
+    # V2
+    "stock_v2_result":       None,
+    "stock_v2_bulan_cols":   [],
+    "stock_v2_pivot_df":     pd.DataFrame(),
 }
 for key, default in _defaults.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ── Koneksi Google Drive (dilakukan sekali di sini) ────────────────────────────
+# ── Koneksi Google Drive ───────────────────────────────────────────────────────
 from utils.gdrive import init_drive_service
-
 drive_service, DRIVE_AVAILABLE = init_drive_service()
 
-if not DRIVE_AVAILABLE:
-    if page != "Input Data":
-        st.warning("Koneksi Google Drive tidak tersedia. Harap periksa kredensial.")
+if not DRIVE_AVAILABLE and page != "Input Data":
+    st.warning("Koneksi Google Drive tidak tersedia. Harap periksa kredensial.")
 
 # ── Routing Halaman ────────────────────────────────────────────────────────────
 if page == "Input Data":
@@ -68,6 +76,10 @@ if page == "Input Data":
 
 elif page == "Hasil Analisa Stock":
     from pages.stock_analysis import render
+    render()
+
+elif page == "Hasil Analisa Stock V2":
+    from pages.stock_analysis_v2 import render
     render()
 
 elif page == "Hasil Analisa ABC":
