@@ -42,11 +42,12 @@ def render():
     st.title("📈 Hasil Analisa Stock V2")
     st.info(f"""
     **Perbedaan dengan V1:**
-    - ✅ Add Stock mempertimbangkan **buffer lead time {LEAD_TIME_CABANG} hari** (pengiriman Surabaya → Cabang)
-    - ✅ Suggested PO menggunakan **4 skenario distribusi** berdasarkan kondisi stok Surabaya
-    - ✅ Distribusi proporsional berdasarkan **SO WMA** (bukan stok fisik)
+    - ✅ Suggested PO menggunakan **3 skenario distribusi** berdasarkan kondisi stok Surabaya
+    - ✅ Distribusi proporsional berdasarkan **Kategori ABC → SO WMA**
+    - ✅ Filter cabang **AMAN / TIDAK AMAN** (50% threshold)
     - ✅ All Add Stock dipisah: **Cabang / Surabaya / Need Supplier**
     - ✅ Surabaya tidak pernah kirim ke dirinya sendiri
+    - ✅ Stok Sisa = Max(0, Stock Sby - Min Stock Sby)
     """)
 
     if (
@@ -191,9 +192,15 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
         full["Max Stock"] = calculate_max_stock(full, KAT_COL, "SO WMA")
 
         st.markdown("### ⚙️ Konfigurasi V2")
-        st.info(f"""
-        **Add Stock** = Max(0, Min Stock + Buffer Lead Time - Stock Cabang)
-        Buffer Lead Time = CEIL(SO WMA / 30 × **{LEAD_TIME_CABANG} hari**)
+        st.info("""
+        **Add Stock** = Max(0, Min Stock - Stock Cabang)
+
+        **Stok Sisa Surabaya** = Max(0, Stock Sby - Min Stock Sby)
+
+        **Skenario Distribusi:**
+        - 🔴 **KURANG**: Stok Sisa = 0 → semua cabang PO = 0
+        - 🟡 **SISA**: 0 < Stok Sisa < All Add Cabang → prioritas ABC → SO WMA
+        - 🟢 **OVER**: Stok Sisa ≥ All Add Cabang → semua cabang dapat penuh
 
         **Multiplier Min Stock:**
         A & B = 1.00x | C = 0.75x | D = 0.50x | E = 0.25x | F = 0x
@@ -210,23 +217,17 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
 
         full["Status Stock"] = full.apply(get_status_stock, axis=1)
 
-        # ── Add Stock V2 (dengan buffer 7 hari) ───────────────────────────────
+        # ── Add Stock V2 (tanpa buffer lead time) ─────────────────────────────
         full["Add Stock"] = calculate_add_stock_v2(full, KAT_COL, "SO WMA", "Stock Cabang")
 
-        # ── Stock Surabaya untuk referensi distribusi ─────────────────────────
-        stock_sby = stock_melted[stock_melted["City"] == "SURABAYA"][["No. Barang", "Stock"]].rename(
-            columns={"Stock": "Stock Surabaya"}
-        )
-        full = full.merge(stock_sby, on="No. Barang", how="left")
-        full["Stock Surabaya"] = full["Stock Surabaya"].fillna(0)
-
-        # ── Suggested PO V2 (4 skenario) ──────────────────────────────────────
+        # ── Suggested PO V2 (3 skenario) ──────────────────────────────────────
+        # calculate_suggested_po_v2 menggunakan Min Stock & Stock Cabang langsung
         full["Suggested PO"] = calculate_suggested_po_v2(full)
 
         # ── Pembulatan ─────────────────────────────────────────────────────────
         int_cols = [
             "Stock Cabang", "Min Stock", "Max Stock", "Add Stock",
-            "Suggested PO", "Stock Surabaya",
+            "Suggested PO",
             "SO WMA", "SO Mean", "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3",
         ] + bulan_columns_renamed
         for col in int_cols:
@@ -237,8 +238,8 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
             if col in full.columns:
                 full[col] = full[col].round(2)
 
-        st.session_state["stock_v2_result"]       = full.copy()
-        st.session_state["stock_v2_bulan_cols"]   = bulan_columns_renamed
+        st.session_state["stock_v2_result"]     = full.copy()
+        st.session_state["stock_v2_bulan_cols"] = bulan_columns_renamed
         st.success("✅ Analisis Stok V2 berhasil dijalankan!")
 
 
@@ -432,9 +433,9 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         st.markdown("---")
         st.markdown("**Legenda Skenario Distribusi:**")
         col1, col2, col3 = st.columns(3)
-        col1.error("**1 - KURANG**\nSurabaya tidak bisa penuhi dirinya sendiri.\nSemua cabang PO = 0, tunggu distributor.")
-        col2.warning("**2 - TERBATAS/LEBIH**\nAda sisa stok tapi tidak cukup untuk semua.\nPrioritas: TIDAK AMAN dulu (ABC → SO WMA),\nlalu AMAN jika masih ada sisa.")
-        col3.success("**3 - OVER**\nSisa stok cukup untuk semua cabang.\nSemua cabang dapat Add Stock penuh.")
+        col1.error("**1 - KURANG**\nStok Sisa = 0.\nSurabaya tidak bisa kirim ke manapun.\nSemua cabang PO = 0, tunggu distributor.")
+        col2.warning("**2 - SISA**\n0 < Stok Sisa < All Add Cabang.\nAda sisa tapi tidak cukup untuk semua.\nPrioritas: TIDAK AMAN (ABC→SO WMA),\nlalu AMAN jika masih ada sisa.")
+        col3.success("**3 - OVER**\nStok Sisa ≥ All Add Cabang.\nSisa cukup untuk semua cabang.\nSemua cabang dapat Add Stock penuh.")
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
@@ -451,9 +452,9 @@ def _render_dashboard_v2(result, KAT_COL):
         skenario_counts = summary_v2["Skenario_Distribusi"].value_counts()
         col_s1, col_s2, col_s3 = st.columns(3)
         cols_map = {
-            "1 - KURANG":          (col_s1, "🔴"),
-            "2 - TERBATAS/LEBIH":  (col_s2, "🟡"),
-            "3 - OVER":            (col_s3, "🟢"),
+            "1 - KURANG": (col_s1, "🔴"),
+            "2 - SISA":   (col_s2, "🟡"),
+            "3 - OVER":   (col_s3, "🟢"),
         }
         for label, (col, icon) in cols_map.items():
             count = skenario_counts.get(label, 0)
