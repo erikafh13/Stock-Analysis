@@ -338,6 +338,17 @@ def calculate_add_stock_v2(df: pd.DataFrame, kategori_col: str,
     )
     return pd.Series(add_stock.astype(int), index=df.index)
 
+def calculate_persentase_stock(df: pd.DataFrame) -> pd.Series:
+    """
+    Hitung persentase stock terhadap Min Stock.
+    """
+    persen = np.where(
+        df["Min Stock"] > 0,
+        (df["Stock Cabang"] / df["Min Stock"]) * 100,
+        0
+    )
+    return pd.Series(np.round(persen, 1), index=df.index)
+
 def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
     """
     Hitung Suggested PO V2 dengan 3 skenario distribusi final.
