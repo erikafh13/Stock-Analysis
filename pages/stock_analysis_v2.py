@@ -269,6 +269,25 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
         # calculate_suggested_po_v2 menggunakan Min Stock & Stock Cabang langsung
         full["Suggested PO"] = calculate_suggested_po_v2(full)
 
+        # ── Sisa Stock Surabaya (per SKU) ─────────────────────────
+        # Ambil data Surabaya per SKU
+        sby = full[full["City"] == "SURABAYA"][["No. Barang", "Stock Cabang", "Min Stock"]].copy()
+
+        sby["Sisa Stock Surabaya"] = np.maximum(
+            0,
+            sby["Stock Cabang"] - sby["Min Stock"]
+        )
+
+        # Merge ke semua cabang
+        full = pd.merge(
+            full,
+            sby[["No. Barang", "Sisa Stock Surabaya"]],
+            on="No. Barang",
+            how="left"
+        )
+
+        full["Sisa Stock Surabaya"] = full["Sisa Stock Surabaya"].fillna(0)
+
         # ── Pembulatan ─────────────────────────────────────────────────────────
         int_cols = [
             "Stock Cabang", "Min Stock", "Max Stock", "Add Stock",
@@ -398,7 +417,7 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
             + ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
             + ["SO WMA", "SO Mean", "SO Total"]
             + ["Log (10) WMA", "Avg Log WMA", "Ratio Log WMA", KAT_COL]
-            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock", "Add Stock", "Suggested PO"]
+            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Sisa Stock Surabaya", "Status Stock", "Add Stock", "Suggested PO"]
         )
         pivot_existing = [c for c in pivot_cols if c in result.columns]
         pivot = result.pivot_table(index=KEYS, columns="City", values=pivot_existing, aggfunc="first")
