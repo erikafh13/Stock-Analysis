@@ -520,7 +520,7 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
         min_stock_sby = sby_rows["Min Stock"].sum()
         stok_sisa     = max(0, stock_sby - min_stock_sby)
         all_add_cabang = group.loc[mask_cab, "Add Stock"].sum()
-        need_supplier  = max(0, all_add_cabang - stock_sby - min_stock_sby)
+        need_supplier  = max(0, all_add_cabang - (stock_sby - min_stock_sby))
 
         # Tentukan skenario (3 skenario final)
         if stok_sisa <= 0:
