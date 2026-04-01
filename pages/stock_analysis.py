@@ -182,7 +182,11 @@ def _run_stock_analysis(penjualan, produk_ref, df_stock, end_date):
             .reset_index()
         )
         full_data = pd.merge(full_data, monthly, on=["City", "No. Barang"], how="left")
-        full_data.fillna(0, inplace=True)
+        for col in full_data.columns:
+            if pd.api.types.is_numeric_dtype(full_data[col]):
+                full_data[col] = full_data[col].fillna(0)
+            else:
+                full_data[col] = full_data[col].fillna("")
 
         # Rename kolom Period → nama bulan Indonesia
         period_cols = sorted([c for c in full_data.columns if isinstance(c, pd.Period)])
