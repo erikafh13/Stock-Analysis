@@ -534,6 +534,6 @@ def _render_dashboard_v2(result, KAT_COL):
         if not summary_v2.empty:
             top_sup = summary_v2.nlargest(5, "All_Need_From_Supplier")[
                 ["Nama Barang", "All_Need_From_Supplier", "All_Add_Stock_Cabang",
-                 "All_Add_Stock_Surabaya", "Skenario_Distribusi"]
+                 "Skenario_Distribusi"]
             ]
             st.dataframe(top_sup, use_container_width=True)
