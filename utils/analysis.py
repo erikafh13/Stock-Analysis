@@ -338,194 +338,6 @@ def calculate_add_stock_v2(df: pd.DataFrame, kategori_col: str,
     )
     return pd.Series(add_stock.astype(int), index=df.index)
 
-
-def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
-    """
-    Hitung Suggested PO V2 dengan 3 skenario.
-
-    Definisi:
-        Stok_Sisa      = Max(0, Stock Sby - Min Stock Sby)
-        All_Add_Cabang = SUM(Add Stock semua cabang NON-Surabaya)
-
-        TIDAK AMAN = Stock Cabang < 50% x Add Stock AND Add Stock > 0 AND Kategori != F
-        AMAN       = Stock Cabang >= 50% x Add Stock AND Add Stock > 0 AND Kategori != F
-        SKIP       = Add Stock = 0 OR Kategori = F
-
-    3 Skenario:
-        1. KURANG : Stok_Sisa = 0
-                    → Semua cabang PO = 0
-
-        2. SISA   : 0 < Stok_Sisa < All_Add_Cabang
-                    → Prioritas: TIDAK AMAN dulu (ABC → SO WMA → proporsional)
-                    → Jika masih sisa → AMAN (ABC → SO WMA → proporsional)
-
-        3. OVER   : Stok_Sisa >= All_Add_Cabang
-                    → Semua cabang dapat Add Stock penuh
-    """
-    result = pd.Series(0, index=df.index, dtype=int)
-
-    for no_barang, group in df.groupby("No. Barang"):
-        mask_sby = group["City"] == "SURABAYA"
-        mask_cab = ~mask_sby
-
-        # ── Data Surabaya ──────────────────────────────────────────────────────
-        sby_rows      = group.loc[mask_sby]
-        stock_sby     = float(sby_rows["Stock Cabang"].sum())
-        min_stock_sby = float(sby_rows["Min Stock"].sum())
-        stok_sisa     = max(0.0, stock_sby - min_stock_sby)
-
-        # Surabaya selalu PO = 0
-        result.loc[sby_rows.index] = 0
-
-        # ── Data Cabang Non-Surabaya ───────────────────────────────────────────
-        cab_rows       = group.loc[mask_cab].copy()
-        all_add_cabang = float(cab_rows["Add Stock"].sum())
-
-        if all_add_cabang == 0:
-            continue
-
-        # ── Skenario 1: KURANG ────────────────────────────────────────────────
-        if stok_sisa <= 0:
-            result.loc[cab_rows.index] = 0
-            continue
-
-        # ── Skenario 3: OVER ──────────────────────────────────────────────────
-        if stok_sisa >= all_add_cabang:
-            kat_col = "Kategori ABC (Log-Benchmark - WMA)"
-            po_over = np.where(
-                (cab_rows[kat_col] == "F") | (cab_rows["Add Stock"] == 0),
-                0,
-                cab_rows["Add Stock"],
-            )
-            result.loc[cab_rows.index] = po_over
-            continue
-
-        # ── Skenario 2: SISA ──────────────────────────────────────────────────
-        # 0 < Stok_Sisa < All_Add_Cabang
-        kat_col = "Kategori ABC (Log-Benchmark - WMA)"
-
-        def _klasifikasi(row):
-            if row["Add Stock"] == 0 or row[kat_col] == "F":
-                return "SKIP"
-            if row["Stock Cabang"] < 0.5 * row["Add Stock"]:
-                return "TIDAK_AMAN"
-            return "AMAN"
-
-        cab_rows["_status"] = cab_rows.apply(_klasifikasi, axis=1)
-
-        tidak_aman = cab_rows[cab_rows["_status"] == "TIDAK_AMAN"].copy()
-        aman       = cab_rows[cab_rows["_status"] == "AMAN"].copy()
-
-        sisa = int(stok_sisa)
-
-        def _distribusi(grup: pd.DataFrame, stok_tersedia: int) -> tuple:
-            """Distribusikan stok ke grup berdasarkan prioritas ABC → SO WMA."""
-            if grup.empty or stok_tersedia <= 0:
-                return pd.Series(0, index=grup.index, dtype=int), stok_tersedia
-
-            po = pd.Series(0, index=grup.index, dtype=int)
-            grup = grup.copy()
-            grup["_abc_order"] = grup[kat_col].map(_ABC_ORDER).fillna(99)
-
-            for _, kat_group in grup.groupby("_abc_order", sort=True):
-                if stok_tersedia <= 0:
-                    break
-
-                total_add_kat = int(kat_group["Add Stock"].sum())
-
-                if stok_tersedia >= total_add_kat:
-                    # Cukup untuk semua kategori ini → penuh
-                    po.loc[kat_group.index] = kat_group["Add Stock"].values
-                    stok_tersedia -= total_add_kat
-                else:
-                    # Tidak cukup → proporsional SO WMA
-                    total_so = float(kat_group["SO WMA"].sum())
-                    if total_so == 0:
-                        break
-
-                    po_raw   = np.ceil(
-                        kat_group["SO WMA"] / total_so * stok_tersedia
-                    ).astype(int)
-                    po_final = np.minimum(po_raw, kat_group["Add Stock"])
-
-                    # Koreksi kelebihan akibat CEIL
-                    total_po  = int(po_final.sum())
-                    kelebihan = total_po - stok_tersedia
-                    if kelebihan > 0:
-                        for idx in kat_group["SO WMA"].sort_values().index:
-                            if kelebihan <= 0:
-                                break
-                            kurang         = min(int(po_final[idx]), kelebihan)
-                            po_final[idx] -= kurang
-                            kelebihan     -= kurang
-
-                    po.loc[kat_group.index] = po_final.values
-                    stok_tersedia = 0
-                    break
-
-            return po, stok_tersedia
-
-        # STEP 1: Proses TIDAK AMAN dulu
-        po_tidak_aman, sisa = _distribusi(tidak_aman, sisa)
-        result.loc[tidak_aman.index] = po_tidak_aman.values
-
-        # STEP 2: Jika masih ada sisa → proses AMAN
-        if sisa > 0 and not aman.empty:
-            po_aman, sisa = _distribusi(aman, sisa)
-            result.loc[aman.index] = po_aman.values
-
-    return result
-
-
-def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Hitung kolom summary ALL untuk logika V2.
-
-    Kolom:
-        All_Add_Stock_Cabang   : SUM Add Stock cabang NON-Surabaya
-        All_Add_Stock_Surabaya : Add Stock toko Surabaya (Max(0, Min-Stock))
-        All_Need_From_Supplier : Max(0, All_Add_Cabang + All_Add_Sby - Stock_Sby)
-        All_Restock_1_Bulan    : "PO" / "NO"
-        Skenario_Distribusi    : 1-KURANG / 2-SISA / 3-OVER
-    """
-    KEYS = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
-    rows = []
-
-    for no_barang, group in df.groupby("No. Barang"):
-        mask_sby = group["City"] == "SURABAYA"
-        mask_cab = ~mask_sby
-
-        sby_rows      = group.loc[mask_sby]
-        stock_sby     = float(sby_rows["Stock Cabang"].sum())
-        min_stock_sby = float(sby_rows["Min Stock"].sum())
-        stok_sisa     = max(0.0, stock_sby - min_stock_sby)
-        add_stock_sby = max(0.0, min_stock_sby - stock_sby)  # kebutuhan toko Sby
-
-        all_add_cabang = float(group.loc[mask_cab, "Add Stock"].sum())
-        need_supplier  = max(0.0, all_add_cabang + add_stock_sby - stock_sby)
-
-        # Skenario
-        if stok_sisa <= 0:
-            skenario = "1 - KURANG"
-        elif stok_sisa >= all_add_cabang:
-            skenario = "3 - OVER"
-        else:
-            skenario = "2 - SISA"
-
-        first = group.iloc[0]
-        row   = {k: first[k] for k in KEYS if k in group.columns}
-        row.update({
-            "All_Add_Stock_Cabang":   int(all_add_cabang),
-            "All_Add_Stock_Surabaya": int(add_stock_sby),
-            "All_Need_From_Supplier": int(need_supplier),
-            "All_Restock_1_Bulan":    "PO" if need_supplier > 0 else "NO",
-            "Skenario_Distribusi":    skenario,
-        })
-        rows.append(row)
-
-    return pd.DataFrame(rows)
-
-
 def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
     """
     Hitung Suggested PO V2 dengan 3 skenario distribusi final.
@@ -567,8 +379,8 @@ def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
         # ── Data Surabaya ──────────────────────────────────────────────────────
         sby_rows      = group.loc[mask_sby]
         stock_sby     = sby_rows["Stock Cabang"].sum()
-        add_stock_sby = sby_rows["Add Stock"].sum()
-        stok_sisa     = max(0, stock_sby - add_stock_sby)
+        min_stock_sby = sby_rows["Min Stock"].sum()
+        stok_sisa     = max(0, stock_sby - min_stock_sby)
 
         # Surabaya selalu PO = 0
         result.loc[sby_rows.index] = 0
@@ -705,10 +517,10 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
 
         sby_rows       = group.loc[mask_sby]
         stock_sby      = sby_rows["Stock Cabang"].sum()
-        add_stock_sby  = sby_rows["Add Stock"].sum()
-        stok_sisa      = max(0, stock_sby - add_stock_sby)
+        min_stock_sby = sby_rows["Min Stock"].sum()
+        stok_sisa     = max(0, stock_sby - min_stock_sby)
         all_add_cabang = group.loc[mask_cab, "Add Stock"].sum()
-        need_supplier  = max(0, all_add_cabang + add_stock_sby - stock_sby)
+        need_supplier  = max(0, all_add_cabang - stock_sby - min_stock_sby)
 
         # Tentukan skenario (3 skenario final)
         if stok_sisa <= 0:
