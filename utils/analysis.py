@@ -534,7 +534,6 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
         row   = {k: first[k] for k in KEYS if k in group.columns}
         row.update({
             "All_Add_Stock_Cabang":   int(all_add_cabang),
-            "All_Add_Stock_Surabaya": int(add_stock_sby),
             "All_Need_From_Supplier": int(need_supplier),
             "All_Restock_1_Bulan":    "PO" if need_supplier > 0 else "NO",
             "Skenario_Distribusi":    skenario,
