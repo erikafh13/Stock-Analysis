@@ -168,7 +168,13 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
             .sum().unstack(fill_value=0).reset_index()
         )
         full = pd.merge(full, monthly, on=["City", "No. Barang"], how="left")
-        full.fillna(0, inplace=True)
+        
+        # Pisahkan tipe data
+        num_cols = full.select_dtypes(include=["number"]).columns
+        str_cols = full.select_dtypes(exclude=["number"]).columns
+
+        full[num_cols] = full[num_cols].fillna(0)
+        full[str_cols] = full[str_cols].fillna("")
 
         period_cols = sorted([c for c in full.columns if isinstance(c, pd.Period)])
         rename_map  = {c: f"{BULAN_INDONESIA[c.month]} {c.year}" for c in period_cols}
