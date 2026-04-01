@@ -63,16 +63,47 @@ def render():
     produk_ref = st.session_state.produk_ref.copy()
     df_stock   = st.session_state.df_stock.copy()
 
+    # ── Normalisasi Kolom Kunci ─────────────────────────────────────────────
     for df in [penjualan, produk_ref, df_stock]:
         if "No. Barang" in df.columns:
             df["No. Barang"] = df["No. Barang"].astype(str).str.strip()
 
+    # ── Deduplikasi Penjualan (Faktur + Barang) ─────────────────────────────
     if "No. Faktur" in penjualan.columns and "No. Barang" in penjualan.columns:
-        penjualan["No. Faktur"]      = penjualan["No. Faktur"].astype(str).str.strip()
-        penjualan["Faktur + Barang"] = penjualan["No. Faktur"] + penjualan["No. Barang"]
-        penjualan.drop_duplicates(subset=["Faktur + Barang"], keep="first", inplace=True)
+        penjualan["No. Faktur"] = penjualan["No. Faktur"].astype(str).str.strip()
 
+        # Buat key unik
+        penjualan["Faktur + Barang"] = (
+            penjualan["No. Faktur"] + "|" + penjualan["No. Barang"]
+        )
+
+        # Simpan jumlah awal
+        before_count = len(penjualan)
+
+        # Deteksi duplikat
+        duplicates = penjualan[penjualan.duplicated(subset=["Faktur + Barang"], keep=False)]
+
+        # Drop duplikat
+        penjualan = penjualan.drop_duplicates(
+            subset=["Faktur + Barang"], keep="first"
+        ).copy()
+
+        after_count = len(penjualan)
+        deleted_count = before_count - after_count
+
+        # ── Feedback ke user ─────────────────────────────────────────────
+        if deleted_count > 0:
+            st.warning(f"⚠️ Ditemukan dan dihapus {deleted_count} data duplikat (Faktur + Barang).")
+
+            with st.expander("🔍 Lihat Detail Data Duplikat"):
+                deleted_rows = duplicates[~duplicates.index.isin(penjualan.index)]
+                st.dataframe(deleted_rows, use_container_width=True)
+        else:
+            st.info("✅ Tidak ada data duplikat ditemukan.")
+
+    # ── Rename & Mapping ───────────────────────────────────────────────────
     penjualan.rename(columns={"Qty": "Kuantitas"}, inplace=True, errors="ignore")
+
     penjualan["Nama Dept"] = penjualan.apply(map_nama_dept, axis=1)
     penjualan["City"]      = penjualan["Nama Dept"].apply(map_city)
 
