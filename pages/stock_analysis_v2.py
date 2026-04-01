@@ -169,12 +169,14 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
         )
         full = pd.merge(full, monthly, on=["City", "No. Barang"], how="left")
         
-        # Pisahkan tipe data
-        num_cols = full.select_dtypes(include=["number"]).columns
-        str_cols = full.select_dtypes(exclude=["number"]).columns
-
-        full[num_cols] = full[num_cols].fillna(0)
-        full[str_cols] = full[str_cols].fillna("")
+        for col in full.columns:
+            try:
+                if pd.api.types.is_numeric_dtype(full[col]):
+                    full[col] = full[col].fillna(0)
+                else:
+                    full[col] = full[col].astype(str).fillna("")
+            except Exception as e:
+                print(f"Error di kolom {col}: {e}")
 
         period_cols = sorted([c for c in full.columns if isinstance(c, pd.Period)])
         rename_map  = {c: f"{BULAN_INDONESIA[c.month]} {c.year}" for c in period_cols}
@@ -238,7 +240,7 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
         ] + bulan_columns_renamed
         for col in int_cols:
             if col in full.columns:
-                full[col] = full[col].round(0).astype(int)
+                full[col] = pd.to_numeric(full[col], errors="coerce").fillna(0).round(0).astype(int)
 
         for col in ["Log (10) WMA", "Avg Log WMA", "Ratio Log WMA"]:
             if col in full.columns:
