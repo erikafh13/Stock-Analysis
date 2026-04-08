@@ -447,7 +447,7 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
     Kolom yang dihasilkan per No. Barang:
         All_Add_Stock_Cabang   : Total Add Stock cabang NON-Surabaya
         All_Add_Stock_Surabaya : Add Stock toko Surabaya sendiri
-        All_Need_From_Supplier : Max(0, Kol1 + Kol2 - Stock Surabaya)
+        All_Need_From_Supplier : Max(0, All_Add_Cabang + Add_Stock_Sby)
         All_Restock_1_Bulan    : "PO" jika Need_Supplier > 0, else "NO"
         Skenario_Distribusi    : Label skenario (KURANG / TERBATAS_LEBIH / OVER)
     """
@@ -463,7 +463,8 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
         min_stock_sby = sby_rows["Min Stock"].sum()
         stok_sisa     = max(0, stock_sby - min_stock_sby)
         all_add_cabang = group.loc[mask_cab, "Add Stock"].sum()
-        need_supplier  = max(0, all_add_cabang - (stock_sby - min_stock_sby))
+        add_stock_sby  = sby_rows["Add Stock"].sum()
+        need_supplier  = max(0, all_add_cabang + add_stock_sby)       
 
         # Tentukan skenario (3 skenario final)
         if stok_sisa <= 0:
