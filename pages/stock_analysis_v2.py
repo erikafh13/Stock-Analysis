@@ -501,7 +501,7 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         st.markdown("**Legenda Skenario Distribusi:**")
         col1, col2, col3 = st.columns(3)
         col1.error("**1 - KURANG**\nStok Sisa = 0.\nSurabaya tidak bisa kirim ke manapun.\nSemua cabang PO = 0, tunggu distributor.")
-        col2.warning("**2 - SISA**\n0 < Stok Sisa < All Add Cabang.\nAda sisa tapi tidak cukup untuk semua.\nPrioritas: TIDAK AMAN (ABC→SO WMA),\nlalu AMAN jika masih ada sisa.")
+        col2.warning("**2 - SISA**\n0 < Stok Sisa < All Add Cabang.\nAda sisa tapi tidak cukup untuk semua.\nDistribusi berdasarkan urgency (% stok terkecil dahulu).\nTarget: Add Stock / 2 − Stock Cabang per cabang.")
         col3.success("**3 - OVER**\nStok Sisa ≥ All Add Cabang.\nSisa cukup untuk semua cabang.\nSemua cabang dapat Add Stock penuh.")
 
 
