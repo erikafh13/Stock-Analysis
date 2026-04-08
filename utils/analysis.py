@@ -427,7 +427,7 @@ def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
                 break
 
             # Need = Add Stock / 2 - Stock Cabang (target aman minimal)
-            need = max(0.0, (row["Add Stock"] / 2.0) - row["Stock Cabang"])
+            need = max(0.0, (row["Min Stock"] / 2.0) - row["Stock Cabang"])
 
             if need <= 0:
                 continue
