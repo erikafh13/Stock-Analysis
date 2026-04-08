@@ -444,61 +444,65 @@ def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
         # ── Fungsi distribusi per grup ─────────────────────────────────────────
         def _distribusi(grup: pd.DataFrame, stok_tersedia: int) -> tuple:
             """
-            Distribusikan stok ke grup cabang berdasarkan prioritas ABC → SO WMA.
-            Return: (po_series, sisa_stok)
+            Distribusi berbasis:
+            - Urgency (dari Persentase Stock per cabang)
+            - Sequential (prioritas tertinggi dulu)
+            - Target: 50% Min Stock
+            - Tidak harus menghabiskan stok Surabaya
             """
+
             if grup.empty or stok_tersedia <= 0:
                 return pd.Series(0, index=grup.index, dtype=int), stok_tersedia
 
             po = pd.Series(0, index=grup.index, dtype=int)
 
-            # Urutkan berdasarkan ABC priority lalu SO WMA tertinggi
-            grup["_abc_order"] = grup[kat_col].map(ABC_ORDER).fillna(99)
-            grup_sorted = grup.sort_values(["_abc_order", "SO WMA"], ascending=[True, False])
+            # =========================
+            # 🔥 HITUNG URGENCY DINAMIS
+            # =========================
+            persen = pd.Series(index=grup.index, dtype=float)
 
-            # Proses per kategori
-            for kat, kat_group in grup_sorted.groupby("_abc_order", sort=True):
+            for city in grup["City"].unique():
+                mask = grup["City"] == city
+                col_name = f"{city}_Persentase Stock"
+
+                if col_name in grup.columns:
+                    persen.loc[mask] = grup.loc[mask, col_name]
+                else:
+                    persen.loc[mask] = 100  # fallback aman
+
+            persen = persen.fillna(100)
+
+            # urgency: makin kecil persen → makin tinggi
+            urgency = 1 - (persen / 100)
+
+            grup["_urgency"] = urgency
+
+            # =========================
+            # 🔥 URUTKAN PRIORITAS
+            # =========================
+            grup_sorted = grup.sort_values("_urgency", ascending=False)
+
+            # =========================
+            # 🔥 DISTRIBUSI SEQUENTIAL
+            # =========================
+            for idx, row in grup_sorted.iterrows():
                 if stok_tersedia <= 0:
                     break
 
-                total_add_kat = kat_group["Add Stock"].sum()
+                # target minimal (50% min stock)
+                target_min = 0.5 * row["Min Stock"]
 
-                if stok_tersedia >= total_add_kat:
-                    # Cukup untuk semua di kategori ini → penuh
-                    po.loc[kat_group.index] = kat_group["Add Stock"].values
-                    stok_tersedia -= int(total_add_kat)
-                else:
-                    # Tidak cukup → proporsional SO WMA
-                    urgency = kat_group["Add Stock"] / (kat_group["Stock Cabang"] + 1)
+                # kebutuhan aktual
+                need = max(0, target_min - row["Stock Cabang"])
 
-                    bobot = kat_group["SO WMA"] * urgency
-                    total_so = bobot.sum()
-                    if total_so == 0:
-                        break
+                if need <= 0:
+                    continue
 
-                    po_raw   = np.ceil(
-                        bobot / total_so * stok_tersedia
-                    ).astype(int)
-                    # 🔥 BATAS BARU: maksimal 50% dari Add Stock
-                    max_alloc = 0.5 * kat_group["Add Stock"]
+                # alokasi
+                alloc = min(need, stok_tersedia)
 
-                    po_final = np.minimum(po_raw, max_alloc)
-
-                    # Koreksi kelebihan akibat CEIL
-                    total_po = int(po_final.sum())
-                    if total_po > stok_tersedia:
-                        kelebihan  = total_po - stok_tersedia
-                        idx_sorted = kat_group["SO WMA"].sort_values().index
-                        for idx in idx_sorted:
-                            if kelebihan <= 0:
-                                break
-                            kurang         = min(int(po_final[idx]), kelebihan)
-                            po_final[idx] -= kurang
-                            kelebihan     -= kurang
-
-                    po.loc[kat_group.index] = po_final.values
-                    stok_tersedia = 0
-                    break
+                po[idx] = int(np.floor(alloc))
+                stok_tersedia -= po[idx]
 
             return po, stok_tersedia
 
