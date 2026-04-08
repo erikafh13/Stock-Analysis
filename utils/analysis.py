@@ -351,43 +351,31 @@ def calculate_persentase_stock(df: pd.DataFrame) -> pd.Series:
 
 def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
     """
-    Hitung Suggested PO V2 dengan 3 skenario distribusi final.
+    Hitung Suggested PO V2 — distribusi berbasis urgency per cabang.
 
-    Definisi:
-        Add_Stock_Sby  = Add Stock toko Surabaya sendiri
-        Stok_Sisa      = Max(0, Stock Surabaya - Add_Stock_Sby)
-        All_Add_Cabang = SUM(Add Stock semua cabang NON-Surabaya)
+    Logika:
+        Stok_Sisa = Max(0, Stock Surabaya - Min Stock Surabaya)
 
-        TIDAK AMAN = Stock Cabang < 50% x Add Stock
-                     AND Add Stock > 0
-                     AND Kategori != F
-        AMAN       = Stock Cabang >= 50% x Add Stock
-                     AND Add Stock > 0
-                     AND Kategori != F
-        SKIP       = Add Stock = 0 OR Kategori = F → PO = 0
+        Skenario 1 - KURANG  : Stok_Sisa = 0  → semua cabang PO = 0
+        Skenario 3 - OVER    : Stok_Sisa >= Total Add Stock cabang
+                               → semua cabang dapat Add Stock penuh
+        Skenario 2 - TERBATAS: 0 < Stok_Sisa < Total Add Stock cabang
+                               → distribusi berdasarkan urgency:
+                                 1. Urutkan cabang: paling kecil Persentase Stock = paling urgent
+                                 2. Tiap cabang: Need_i = max(0, AddStock_i / 2 - Stock_i)
+                                 3. Ambil dari sisa stok sampai Need terpenuhi atau stok habis
+                                 4. Sisa stok TIDAK dipaksa habis → tetap di Surabaya
 
-    3 Skenario:
-        1. KURANG       : Stok_Sisa = 0
-                          → Semua cabang PO = 0
-
-        2. TERBATAS_LEBIH: 0 < Stok_Sisa < All_Add_Cabang
-                          STEP 1: Proses TIDAK AMAN (ABC → SO WMA)
-                          STEP 2: Jika masih ada sisa → proses AMAN (ABC → SO WMA)
-                          Dalam tiap kategori: penuh jika cukup, proporsional jika tidak
-
-        3. OVER         : Stok_Sisa >= All_Add_Cabang
-                          → Semua cabang dapat Add Stock penuh
+        Cabang Surabaya selalu PO = 0.
+        Kategori F dan Add Stock = 0 selalu PO = 0.
     """
-    # Urutan prioritas kategori ABC
-    ABC_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 99}
-
     result = pd.Series(0, index=df.index, dtype=int)
 
     for no_barang, group in df.groupby("No. Barang"):
         mask_sby = group["City"] == "SURABAYA"
         mask_cab = ~mask_sby
 
-        # ── Data Surabaya ──────────────────────────────────────────────────────
+        # ── Surabaya: hitung sisa stok yang bisa didistribusi ─────────────────
         sby_rows      = group.loc[mask_sby]
         stock_sby     = sby_rows["Stock Cabang"].sum()
         min_stock_sby = sby_rows["Min Stock"].sum()
@@ -396,127 +384,61 @@ def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
         # Surabaya selalu PO = 0
         result.loc[sby_rows.index] = 0
 
-        # ── Data Cabang Non-Surabaya ───────────────────────────────────────────
-        cab_rows      = group.loc[mask_cab].copy()
-        all_add_cabang = cab_rows["Add Stock"].sum()
+        # ── Cabang non-Surabaya ───────────────────────────────────────────────
+        kat_col  = "Kategori ABC (Log-Benchmark - WMA)"
+        cab_rows = group.loc[mask_cab].copy()
 
+        # Hanya cabang yang layak menerima (bukan F, Add Stock > 0)
+        eligible_mask = (cab_rows[kat_col] != "F") & (cab_rows["Add Stock"] > 0)
+        eligible      = cab_rows.loc[eligible_mask].copy()
+
+        all_add_cabang = eligible["Add Stock"].sum()
+
+        # Tidak ada yang butuh → skip
         if all_add_cabang == 0:
             continue
 
-        # ── Skenario 1: KURANG ────────────────────────────────────────────────
+        # ── Skenario 1: KURANG — stok Surabaya habis/tidak cukup ─────────────
         if stok_sisa <= 0:
-            result.loc[cab_rows.index] = 0
+            # result sudah 0 by default
             continue
 
-        # ── Skenario 3: OVER ──────────────────────────────────────────────────
+        # ── Skenario 3: OVER — stok lebih dari cukup ─────────────────────────
         if stok_sisa >= all_add_cabang:
-            # Semua cabang dapat penuh (kecuali F dan Add Stock = 0)
-            po_over = np.where(
-                (cab_rows["Kategori ABC (Log-Benchmark - WMA)"] == "F") | (cab_rows["Add Stock"] == 0),
-                0,
-                cab_rows["Add Stock"]
-            )
-            result.loc[cab_rows.index] = po_over
+            result.loc[eligible.index] = eligible["Add Stock"].values
             continue
 
-        # ── Skenario 2: TERBATAS & LEBIH ─────────────────────────────────────
-        # 0 < Stok_Sisa < All_Add_Cabang
+        # ── Skenario 2: TERBATAS — distribusi berbasis urgency ────────────────
+        # Urgency: makin kecil Persentase Stock → makin urgent
+        persen_col = "Persentase Stock"
+        if persen_col in eligible.columns:
+            eligible = eligible.assign(_persen=eligible[persen_col].fillna(100))
+        else:
+            eligible = eligible.assign(_persen=100.0)
 
-        # Klasifikasi tiap cabang
-        kat_col = "Kategori ABC (Log-Benchmark - WMA)"
+        # Urutkan: urgency tertinggi (persen terkecil) lebih dulu
+        eligible_sorted = eligible.sort_values("_persen", ascending=True)
 
-        def _klasifikasi(row):
-            if row["Add Stock"] == 0 or row[kat_col] == "F":
-                return "SKIP"
-            if row["Stock Cabang"] < 0.5 * row["Add Stock"]:
-                return "TIDAK_AMAN"
-            return "AMAN"
+        sisa = float(stok_sisa)
+        po   = pd.Series(0, index=eligible.index, dtype=int)
 
-        cab_rows["_status"] = cab_rows.apply(_klasifikasi, axis=1)
+        for idx, row in eligible_sorted.iterrows():
+            if sisa <= 0:
+                break
 
-        # Pisahkan grup
-        tidak_aman = cab_rows[cab_rows["_status"] == "TIDAK_AMAN"].copy()
-        aman       = cab_rows[cab_rows["_status"] == "AMAN"].copy()
-        # SKIP → PO = 0 (default sudah 0)
+            # Need = Add Stock / 2 - Stock Cabang (target aman minimal)
+            need = max(0.0, (row["Add Stock"] / 2.0) - row["Stock Cabang"])
 
-        sisa = stok_sisa
+            if need <= 0:
+                continue
 
-        # ── Fungsi distribusi per grup ─────────────────────────────────────────
-        def _distribusi(grup: pd.DataFrame, stok_tersedia: int) -> tuple:
-            """
-            Distribusi berbasis:
-            - Urgency (dari Persentase Stock per cabang)
-            - Sequential (prioritas tertinggi dulu)
-            - Target: 50% Min Stock
-            - Tidak harus menghabiskan stok Surabaya
-            """
+            alloc    = min(need, sisa)
+            po[idx]  = int(np.ceil(alloc))   # ceil agar tidak under-allocate
+            sisa    -= po[idx]
 
-            if grup.empty or stok_tersedia <= 0:
-                return pd.Series(0, index=grup.index, dtype=int), stok_tersedia
-
-            po = pd.Series(0, index=grup.index, dtype=int)
-
-            # =========================
-            # 🔥 HITUNG URGENCY DINAMIS
-            # =========================
-            persen = pd.Series(index=grup.index, dtype=float)
-
-            for city in grup["City"].unique():
-                mask = grup["City"] == city
-                col_name = f"{city}_Persentase Stock"
-
-                if col_name in grup.columns:
-                    persen.loc[mask] = grup.loc[mask, col_name]
-                else:
-                    persen.loc[mask] = 100  # fallback aman
-
-            persen = persen.fillna(100)
-
-            # urgency: makin kecil persen → makin tinggi
-            urgency = 1 - (persen / 100)
-
-            grup["_urgency"] = urgency
-
-            # =========================
-            # 🔥 URUTKAN PRIORITAS
-            # =========================
-            grup_sorted = grup.sort_values("_urgency", ascending=False)
-
-            # =========================
-            # 🔥 DISTRIBUSI SEQUENTIAL
-            # =========================
-            for idx, row in grup_sorted.iterrows():
-                if stok_tersedia <= 0:
-                    break
-
-                # target minimal (50% min stock)
-                target_min = 0.5 * row["Min Stock"]
-
-                # kebutuhan aktual
-                need = max(0, target_min - row["Stock Cabang"])
-
-                if need <= 0:
-                    continue
-
-                # alokasi
-                alloc = min(need, stok_tersedia)
-
-                po[idx] = int(np.floor(alloc))
-                stok_tersedia -= po[idx]
-
-            return po, stok_tersedia
-
-        # STEP 1: Proses TIDAK AMAN dulu
-        po_tidak_aman, sisa = _distribusi(tidak_aman, sisa)
-        result.loc[tidak_aman.index] = po_tidak_aman.values
-
-        # STEP 2: Jika masih ada sisa → proses AMAN
-        if sisa > 0 and not aman.empty:
-            po_aman, sisa = _distribusi(aman, sisa)
-            result.loc[aman.index] = po_aman.values
+        result.loc[eligible.index] = po.values
 
     return result
-
 
 def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
     """
