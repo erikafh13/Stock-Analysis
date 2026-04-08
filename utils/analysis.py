@@ -469,14 +469,20 @@ def calculate_suggested_po_v2(df: pd.DataFrame) -> pd.Series:
                     stok_tersedia -= int(total_add_kat)
                 else:
                     # Tidak cukup → proporsional SO WMA
-                    total_so = kat_group["SO WMA"].sum()
+                    urgency = kat_group["Add Stock"] / (kat_group["Stock Cabang"] + 1)
+
+                    bobot = kat_group["SO WMA"] * urgency
+                    total_so = bobot.sum()
                     if total_so == 0:
                         break
 
                     po_raw   = np.ceil(
-                        kat_group["SO WMA"] / total_so * stok_tersedia
+                        bobot / total_so * stok_tersedia
                     ).astype(int)
-                    po_final = np.minimum(po_raw, kat_group["Add Stock"])
+                    # 🔥 BATAS BARU: maksimal 50% dari Add Stock
+                    max_alloc = 0.5 * kat_group["Add Stock"]
+
+                    po_final = np.minimum(po_raw, max_alloc)
 
                     # Koreksi kelebihan akibat CEIL
                     total_po = int(po_final.sum())
