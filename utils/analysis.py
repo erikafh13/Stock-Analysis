@@ -320,10 +320,11 @@ _ABC_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 99}
 def calculate_add_stock_v2(df: pd.DataFrame, kategori_col: str,
                             so_col: str, stock_col: str) -> pd.Series:
     """
-    Hitung Add Stock V2 — TANPA buffer lead time.
-    Formula sama dengan V1:
-        Add Stock = Max(0, Min Stock - Stock Cabang)
-        Kategori F → 0
+    Hitung Add Stock V2 per kategori ABC:
+        A = max(0, Min Stock - Stock Cabang) + Min Stock * 20%
+        B = max(0, Min Stock - Stock Cabang) + Min Stock * 10%
+        C, D, E = max(0, Min Stock - Stock Cabang)
+        F → 0
     """
     mult      = df[kategori_col].map(DAYS_MULTIPLIER).fillna(1.0)
     min_stock = np.where(
@@ -331,11 +332,20 @@ def calculate_add_stock_v2(df: pd.DataFrame, kategori_col: str,
         0,
         np.ceil(df[so_col] * mult),
     )
-    add_stock = np.where(
-        df[kategori_col] == "F",
-        0,
-        np.maximum(0, min_stock - df[stock_col]),
+    min_stock_s = pd.Series(min_stock, index=df.index)
+    stock_s     = df[stock_col]
+    base        = np.maximum(0, min_stock_s - stock_s)
+
+    # Bonus buffer per kategori
+    bonus = np.where(
+        df[kategori_col] == "A", np.ceil(min_stock_s * 0.20),
+        np.where(
+            df[kategori_col] == "B", np.ceil(min_stock_s * 0.10),
+            0
+        )
     )
+
+    add_stock = np.where(df[kategori_col] == "F", 0, base + bonus)
     return pd.Series(add_stock.astype(int), index=df.index)
 
 def calculate_persentase_stock(df: pd.DataFrame) -> pd.Series:
@@ -464,7 +474,7 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
         stok_sisa     = max(0, stock_sby - min_stock_sby)
         all_add_cabang = group.loc[mask_cab, "Add Stock"].sum()
         add_stock_sby  = sby_rows["Add Stock"].sum()
-        need_supplier  = max(0, all_add_cabang + add_stock_sby)       
+        need_supplier  = max(0, all_add_cabang + add_stock_sby)
 
         # Tentukan skenario (3 skenario final)
         if stok_sisa <= 0:
@@ -474,6 +484,13 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
         else:
             skenario = "2 - TERBATAS/LEBIH"
 
+        # All Stock Cabang & All SO Cabang (semua kota termasuk Surabaya)
+        all_stock_cabang = group["Stock Cabang"].sum()
+        all_so_cabang    = group["SO WMA"].sum()
+
+        # All Suggest PO: PO jika All Stock < All SO, else NO
+        all_suggest_po = "PO" if all_stock_cabang < all_so_cabang else "NO"
+
         first = group.iloc[0]
         row   = {k: first[k] for k in KEYS if k in group.columns}
         row.update({
@@ -481,6 +498,9 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
             "All_Need_From_Supplier": int(need_supplier),
             "All_Restock_1_Bulan":    "PO" if need_supplier > 0 else "NO",
             "Skenario_Distribusi":    skenario,
+            "All_Stock_Cabang":       int(all_stock_cabang),
+            "All_SO_Cabang":          int(all_so_cabang),
+            "All_Suggest_PO":         all_suggest_po,
         })
         rows.append(row)
 
