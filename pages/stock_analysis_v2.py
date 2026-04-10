@@ -238,14 +238,20 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
 
         full["Status Stock"] = full.apply(get_status_stock, axis=1)
 
-        # ── Add Stock V2 (tanpa buffer lead time) ─────────────────────────────
+
+        # ── All Stock Cabang & All SO Cabang (semua kota termasuk Surabaya) ────
+        full["All Stock Cabang"] = full.groupby("No. Barang")["Stock Cabang"].transform("sum")
+        full["All SO Cabang"]    = full.groupby("No. Barang")["SO WMA"].transform("sum")
+
+        # ── Add Stock V2 berbasis kategori ─────────────────────────────────
         full["Add Stock"] = calculate_add_stock_v2(full, KAT_COL, "SO WMA", "Stock Cabang")
 
         # ── Persentase Stock ─────────────────────────
+        # Jika Min Stock = 0 (SO WMA = 0), tidak ada acuan → set 10000 agar terlihat menonjol
         full["Persentase Stock"] = np.where(
             full["Min Stock"] > 0,
             (full["Stock Cabang"] / full["Min Stock"]) * 100,
-            0).round(1)
+            10000).round(1)
 
         # ── Suggested PO V2 (3 skenario) ──────────────────────────────────────
         # calculate_suggested_po_v2 menggunakan Min Stock & Stock Cabang langsung
@@ -441,6 +447,9 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
             "All_All_Need_From_Supplier",
             "All_All_Restock_1_Bulan",
             "All_Skenario_Distribusi",
+            "All_All_Stock_Cabang",
+            "All_All_SO_Cabang",
+            "All_All_Suggest_PO",
             "All_Log", "All_Avg Log", "All_Ratio", "All_Kategori ABC All",
         ]
         final_cols = KEYS + existing_ordered + [c for c in final_summary if c in pivot.columns]
@@ -465,6 +474,9 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
             "All_All_Need_From_Supplier": "All_Need_Supplier",
             "All_All_Restock_1_Bulan":    "All_Restock",
             "All_Skenario_Distribusi":    "All_Skenario",
+            "All_All_Stock_Cabang":       "All_Stock_Cabang",
+            "All_All_SO_Cabang":          "All_SO_Cabang",
+            "All_All_Suggest_PO":         "All_Suggest_PO",
         }
         df_style.rename(columns=rename_display, inplace=True)
 
