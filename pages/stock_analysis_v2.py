@@ -247,11 +247,14 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
         full["Add Stock"] = calculate_add_stock_v2(full, KAT_COL, "SO WMA", "Stock Cabang")
 
         # ── Persentase Stock ─────────────────────────
-        # Jika Min Stock = 0 (SO WMA = 0), tidak ada acuan → set 10000 agar terlihat menonjol
+        # SO WMA = 0 & Stock > 0 → 10000 (ada stok tapi tidak ada acuan SO)
+        # SO WMA = 0 & Stock = 0 → 0 (keduanya kosong, hasil wajar)
+        # SO WMA > 0             → (Stock Cabang / Min Stock) * 100 seperti biasa
         full["Persentase Stock"] = np.where(
             full["Min Stock"] > 0,
             (full["Stock Cabang"] / full["Min Stock"]) * 100,
-            10000).round(1)
+            np.where(full["Stock Cabang"] > 0, 10000, 0)
+        ).round(1)
 
         # ── Suggested PO V2 (3 skenario) ──────────────────────────────────────
         # calculate_suggested_po_v2 menggunakan Min Stock & Stock Cabang langsung
