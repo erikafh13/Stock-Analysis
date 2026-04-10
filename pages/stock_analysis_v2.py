@@ -68,38 +68,20 @@ def render():
         if "No. Barang" in df.columns:
             df["No. Barang"] = df["No. Barang"].astype(str).str.strip()
 
-    # ── Deduplikasi Penjualan (Faktur + Barang) ─────────────────────────────
+    # Deduplikasi faktur
     if "No. Faktur" in penjualan.columns and "No. Barang" in penjualan.columns:
-        penjualan["No. Faktur"] = penjualan["No. Faktur"].astype(str).str.strip()
-
-        # Buat key unik
-        penjualan["Faktur + Barang"] = (
-            penjualan["No. Faktur"] + "|" + penjualan["No. Barang"]
-        )
-
-        # Simpan jumlah awal
-        before_count = len(penjualan)
-
-        # Deteksi duplikat
+        penjualan["No. Faktur"]     = penjualan["No. Faktur"].astype(str).str.strip()
+        penjualan["Faktur + Barang"] = penjualan["No. Faktur"] + penjualan["No. Barang"]
         duplicates = penjualan[penjualan.duplicated(subset=["Faktur + Barang"], keep=False)]
-
-        # Drop duplikat
-        penjualan = penjualan.drop_duplicates(
-            subset=["Faktur + Barang"], keep="first"
-        ).copy()
-
-        after_count = len(penjualan)
-        deleted_count = before_count - after_count
-
-        # ── Feedback ke user ─────────────────────────────────────────────
-        if deleted_count > 0:
-            st.warning(f"⚠️ Ditemukan dan dihapus {deleted_count} data duplikat (Faktur + Barang).")
-
-            with st.expander("🔍 Lihat Detail Data Duplikat"):
-                deleted_rows = duplicates[~duplicates.index.isin(penjualan.index)]
-                st.dataframe(deleted_rows, use_container_width=True)
+        penjualan.drop_duplicates(subset=["Faktur + Barang"], keep="first", inplace=True)
+        st.session_state.df_penjualan = penjualan.copy()
+        if not duplicates.empty:
+            deleted = duplicates[~duplicates.index.isin(penjualan.index)]
+            st.warning(f"⚠️ Ditemukan dan dihapus {len(deleted)} baris duplikat 'Faktur + Barang'.")
+            with st.expander("Lihat Detail Duplikat yang Dihapus"):
+                st.dataframe(deleted)
         else:
-            st.info("✅ Tidak ada data duplikat ditemukan.")
+            st.info("✅ Tidak ada duplikat 'Faktur + Barang' yang ditemukan.")
 
     # ── Rename & Mapping ───────────────────────────────────────────────────
     penjualan.rename(columns={"Qty": "Kuantitas"}, inplace=True, errors="ignore")
