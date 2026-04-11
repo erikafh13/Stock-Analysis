@@ -468,6 +468,44 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         df_style[float_cols] = df_style[float_cols].fillna(0)
         df_style[obj_cols]   = df_style[obj_cols].fillna("-")
 
+        # ── Rename kolom: singkatan kota, format bulan, label ringkas ──────────
+        CITY_SHORT = {
+            "BALI":     "BALI",
+            "JAKARTA":  "JKT",
+            "JOGJA":    "JOG",
+            "MALANG":   "MLG",
+            "SEMARANG": "SMG",
+            "SURABAYA": "SBY",
+        }
+
+        # Nama bulan Indonesia title-case agar tidak kapital semua
+        BULAN_TITLE = {
+            "JANUARI": "Jan", "FEBRUARI": "Feb", "MARET": "Mar",
+            "APRIL": "Apr", "MEI": "Mei", "JUNI": "Jun",
+            "JULI": "Jul", "AGUSTUS": "Agu", "SEPTEMBER": "Sep",
+            "OKTOBER": "Okt", "NOVEMBER": "Nov", "DESEMBER": "Des",
+        }
+
+        def _rename_col(col):
+            # Pisah prefix kota dari nama metrik
+            for city_long, city_short in CITY_SHORT.items():
+                if col.startswith(city_long + "_"):
+                    metric = col[len(city_long) + 1:]
+                    # Ganti nama bulan kapital → title-case singkat
+                    for bln_upper, bln_title in BULAN_TITLE.items():
+                        if metric.startswith(bln_upper + " "):
+                            tahun = metric.split(" ", 1)[1]
+                            metric = f"{bln_title} {tahun}"
+                            break
+                    # "Penjualan Bln X" → "Bln X"
+                    metric = metric.replace("Penjualan Bln ", "Bln ")
+                    # Hapus "(Log-Benchmark - WMA)" dari nama kolom ABC
+                    metric = metric.replace(" (Log-Benchmark - WMA)", "")
+                    return f"{city_short}_{metric}"
+            return col
+
+        df_style.rename(columns=_rename_col, inplace=True)
+
         # Rename kolom All_ agar lebih readable
         rename_display = {
             "All_All_Add_Stock_Cabang":   "All_Add_Cabang",
@@ -486,12 +524,15 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
                 r"^\d+\s*-\s*", "", regex=True
             )
 
+        # col_cfg: pakai nama kolom setelah semua rename selesai
         col_cfg = {}
-        for c in num_cols:
-            display_name = rename_display.get(c, c)
-            col_cfg[display_name] = st.column_config.NumberColumn(format="%.0f")
-        for c in float_cols:
-            col_cfg[c] = st.column_config.NumberColumn(format="%.2f")
+        for c in df_style.columns:
+            if c in KEYS:
+                continue
+            if pd.api.types.is_numeric_dtype(df_style[c]) and not any(x in c for x in ["Ratio", "Log", "Avg Log"]):
+                col_cfg[c] = st.column_config.NumberColumn(format="%.0f")
+            elif any(x in c for x in ["Ratio", "Log", "Avg Log"]):
+                col_cfg[c] = st.column_config.NumberColumn(format="%.2f")
 
         st.session_state["stock_v2_pivot_df"] = df_style.copy()
         st.dataframe(df_style, column_config=col_cfg, use_container_width=True)
