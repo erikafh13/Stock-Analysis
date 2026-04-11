@@ -318,25 +318,22 @@ _ABC_ORDER = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 99}
 
 
 def calculate_add_stock_v2(df: pd.DataFrame, kategori_col: str,
-                            so_col: str, stock_col: str) -> pd.Series:
-    """
-    Hitung Add Stock V2 per kategori ABC:
-        A = max(0, Min Stock - Stock Cabang) + Min Stock * 20%
-        B = max(0, Min Stock - Stock Cabang) + Min Stock * 10%
-        C, D, E = max(0, Min Stock - Stock Cabang)
-        F → 0
-    """
+                          so_col: str, stock_col: str) -> pd.Series:
     mult      = df[kategori_col].map(DAYS_MULTIPLIER).fillna(1.0)
+
     min_stock = np.where(
         (df[so_col] <= 0) | (df[kategori_col] == "F"),
         0,
         np.ceil(df[so_col] * mult),
     )
+
     min_stock_s = pd.Series(min_stock, index=df.index)
     stock_s     = df[stock_col]
-    base        = np.maximum(0, min_stock_s - stock_s)
 
-    # Bonus buffer per kategori
+    # base kebutuhan
+    base = np.maximum(0, min_stock_s - stock_s)
+
+    # bonus hanya untuk A & B
     bonus = np.where(
         df[kategori_col] == "A", np.ceil(min_stock_s * 0.20),
         np.where(
@@ -345,7 +342,13 @@ def calculate_add_stock_v2(df: pd.DataFrame, kategori_col: str,
         )
     )
 
-    add_stock = np.where(df[kategori_col] == "F", 0, base + bonus)
+    # 🔥 FIX UTAMA: bonus hanya jika base > 0
+    add_stock = np.where(
+        df[kategori_col] == "F",
+        0,
+        np.where(base > 0, base + bonus, 0)
+    )
+
     return pd.Series(add_stock.astype(int), index=df.index)
 
 def calculate_persentase_stock(df: pd.DataFrame) -> pd.Series:
