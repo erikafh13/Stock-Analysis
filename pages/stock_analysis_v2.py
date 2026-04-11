@@ -403,12 +403,15 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
     with st.spinner("Membuat tabel pivot..."):
         KEYS = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
 
+        # Hanya tampilkan 2 bulan terakhir dari bulan_cols
+        bulan_cols_2 = bulan_cols[-2:] if len(bulan_cols) >= 2 else bulan_cols
+
         pivot_cols = (
-            bulan_cols
+            bulan_cols_2
             + ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
-            + ["SO WMA", "SO Mean", "SO Total"]
-            + ["Log (10) WMA", "Avg Log WMA", "Ratio Log WMA", KAT_COL]
-            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Sisa Stock Surabaya", "Status Stock", "Add Stock", "Suggested PO"]
+            + ["SO WMA", "SO Total"]
+            + [KAT_COL]
+            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock", "Add Stock", "Suggested PO"]
         )
         pivot_existing = [c for c in pivot_cols if c in result.columns]
         pivot = result.pivot_table(index=KEYS, columns="City", values=pivot_existing, aggfunc="first")
@@ -432,28 +435,23 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         all_abc_input["City"] = "ALL"
         all_classified = classify_abc_log_benchmark(all_abc_input, metric_col="Total Kuantitas")
         all_classified.rename(columns={
-            "Log (10) Total Kuantitas":                       "All_Log",
-            "Avg Log Total Kuantitas":                        "All_Avg Log",
-            "Ratio Log Total Kuantitas":                      "All_Ratio",
             "Kategori ABC (Log-Benchmark - Total Kuantitas)": "All_Kategori ABC All",
         }, inplace=True)
 
         # Gabung semua ke pivot
         pivot = pd.merge(pivot, summary_v2, on=KEYS, how="left")
-        pivot = pd.merge(pivot, all_classified[KEYS + ["All_Log", "All_Avg Log",
-                                                        "All_Ratio", "All_Kategori ABC All"]], on=KEYS, how="left")
+        pivot = pd.merge(pivot, all_classified[KEYS + ["All_Kategori ABC All"]], on=KEYS, how="left")
 
-        # Kolom summary final — 3 kolom All Add Stock terpisah
+        # Kolom summary final
         final_summary = [
             "All_All_Add_Stock_Cabang",
             "All_All_Add_Stock_Surabaya",
             "All_All_Need_From_Supplier",
-            "All_All_Restock_1_Bulan",
             "All_Skenario_Distribusi",
             "All_All_Stock_Cabang",
             "All_All_SO_Cabang",
             "All_All_Suggest_PO",
-            "All_Log", "All_Avg Log", "All_Ratio", "All_Kategori ABC All",
+            "All_Kategori ABC All",
         ]
         final_cols = KEYS + existing_ordered + [c for c in final_summary if c in pivot.columns]
         df_style   = pivot[[c for c in final_cols if c in pivot.columns]].copy()
@@ -474,14 +472,19 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         rename_display = {
             "All_All_Add_Stock_Cabang":   "All_Add_Cabang",
             "All_All_Add_Stock_Surabaya": "All_Add_Surabaya",
-            "All_All_Need_From_Supplier": "All_Need_Supplier",
-            "All_All_Restock_1_Bulan":    "All_Restock",
+            "All_All_Need_From_Supplier": "All_Need_Distributor",
             "All_Skenario_Distribusi":    "All_Skenario",
             "All_All_Stock_Cabang":       "All_Stock_Cabang",
             "All_All_SO_Cabang":          "All_SO_Cabang",
-            "All_All_Suggest_PO":         "All_Suggest_PO",
+            "All_All_Suggest_PO":         "Restock?",
         }
         df_style.rename(columns=rename_display, inplace=True)
+
+        # Bersihkan label skenario: hapus angka di depan (e.g. "1 - KURANG" → "KURANG")
+        if "All_Skenario" in df_style.columns:
+            df_style["All_Skenario"] = df_style["All_Skenario"].str.replace(
+                r"^\d+\s*-\s*", "", regex=True
+            )
 
         col_cfg = {}
         for c in num_cols:
