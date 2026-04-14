@@ -411,7 +411,7 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
             + ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
             + ["SO WMA", "SO Total"]
             + [KAT_COL]
-            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock", "Add Stock", "Suggested PO"]
+            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock", "Add Stock", "Suggested PO", "Sisa Stock Surabaya"]
         )
         pivot_existing = [c for c in pivot_cols if c in result.columns]
         pivot = result.pivot_table(index=KEYS, columns="City", values=pivot_existing, aggfunc="first")
@@ -511,7 +511,7 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
             "All_All_Add_Stock_Cabang":   "All_Add_Cabang",
             "All_All_Add_Stock_Surabaya": "All_Add_Surabaya",
             "All_All_Need_From_Supplier": "All_Need_Distributor",
-            "All_Skenario_Distribusi":    "All_Skenario",
+            "All_Skenario_Distribusi":    "SBY_Skenario",
             "All_All_Stock_Cabang":       "All_Stock_Cabang",
             "All_All_SO_Cabang":          "All_SO_Cabang",
             "All_All_Suggest_PO":         "Restock?",
@@ -519,10 +519,48 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         df_style.rename(columns=rename_display, inplace=True)
 
         # Bersihkan label skenario: hapus angka di depan (e.g. "1 - KURANG" → "KURANG")
-        if "All_Skenario" in df_style.columns:
-            df_style["All_Skenario"] = df_style["All_Skenario"].str.replace(
+        if "SBY_Skenario" in df_style.columns:
+            df_style["SBY_Skenario"] = df_style["SBY_Skenario"].str.replace(
                 r"^\d+\s*-\s*", "", regex=True
             )
+
+        # ── Susun ulang urutan kolom akhir ─────────────────────────────────────
+        # 1. Hapus SBY_Suggested PO dari tampilan
+        if "SBY_Suggested PO" in df_style.columns:
+            df_style.drop(columns=["SBY_Suggested PO"], inplace=True)
+
+        # 2. Rename SBY_Sisa Stock Surabaya → SBY_Sisa Stock
+        if "SBY_Sisa Stock Surabaya" in df_style.columns:
+            df_style.rename(columns={"SBY_Sisa Stock Surabaya": "SBY_Sisa Stock"}, inplace=True)
+
+        # 3. Susun ulang kolom: kota non-SBY → SBY (tanpa Suggested PO) → SBY_Add Stock
+        #    → SBY_Sisa Stock → SBY_Skenario → All_Add_Cabang → All_Stock_Cabang
+        #    → All_SO_Cabang → All_Kategori ABC All → All_Need_Distributor → Restock?
+        sby_fixed_tail = ["SBY_Add Stock", "SBY_Sisa Stock"]
+        sby_skenario_col = ["SBY_Skenario"]
+        all_cols_order = [
+            "All_Add_Cabang",
+            "All_Stock_Cabang",
+            "All_SO_Cabang",
+            "All_Kategori ABC All",
+            "All_Need_Distributor",
+            "Restock?",
+        ]
+        special_cols = set(sby_fixed_tail + sby_skenario_col + all_cols_order + ["Restock?"])
+        non_sby_city_cols = [c for c in df_style.columns
+                             if c not in KEYS and not c.startswith("SBY_") and c not in special_cols]
+        sby_other_cols = [c for c in df_style.columns
+                          if c.startswith("SBY_") and c not in special_cols]
+        new_order = (
+            KEYS
+            + non_sby_city_cols
+            + sby_other_cols
+            + [c for c in sby_fixed_tail if c in df_style.columns]
+            + [c for c in sby_skenario_col if c in df_style.columns]
+            + [c for c in all_cols_order if c in df_style.columns]
+            + [c for c in df_style.columns if c not in KEYS + non_sby_city_cols + sby_other_cols + sby_fixed_tail + sby_skenario_col + all_cols_order]
+        )
+        df_style = df_style[[c for c in new_order if c in df_style.columns]]
 
         # col_cfg: pakai nama kolom setelah semua rename selesai
         col_cfg = {}
