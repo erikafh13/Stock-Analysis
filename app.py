@@ -31,6 +31,7 @@ page = st.sidebar.radio(
         "Input Data",
         "Hasil Analisa Stock",
         "Hasil Analisa Stock V2",
+        "Analisis Donor Stock",
         "Hasil Analisa ABC",
         "Hasil Analisis Margin",
     ),
@@ -80,6 +81,10 @@ elif page == "Hasil Analisa Stock":
 
 elif page == "Hasil Analisa Stock V2":
     from pages.stock_analysis_v2 import render
+    render()
+
+elif page == "Analisis Donor Stock":
+    from pages.stock_donor import render
     render()
 
 elif page == "Hasil Analisa ABC":
