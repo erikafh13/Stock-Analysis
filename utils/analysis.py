@@ -508,3 +508,191 @@ def calculate_all_summary_v2(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+# ==============================================================================
+# LOGIKA DONOR — Multi-Source Distribution (V3 Lateral Transfer)
+# ==============================================================================
+
+def calculate_donor_distribution(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Hitung distribusi lateral antar cabang (donor → penerima).
+
+    Logika:
+    - Setiap cabang dengan Status "Overstock" bisa menjadi donor.
+    - Jumlah yang bisa didonorkan = Stock Cabang - Max Stock (kelebihan di atas max).
+    - Penerima: cabang Understock, diurutkan berdasarkan Persentase Stock terkecil (paling urgent).
+    - SBY tetap sebagai sumber utama (Sisa SBY = Stock SBY - Min Stock SBY).
+    - Urutan pengambilan: SBY dulu → kemudian donor non-SBY (urut dari donor terbesar).
+    - Sisa kebutuhan setelah distribusi = flag butuh supplier.
+
+    Returns DataFrame dengan kolom per baris (per No.Barang × City):
+        Donor_Ke       : string nama cabang penerima (comma-separated), atau "-"
+        Terima_Dari    : string nama cabang pengirim, atau "-"
+        Qty_Donor      : jumlah yang dikirim dari cabang ini ke penerima
+        Qty_Terima     : jumlah yang diterima cabang ini dari donor
+        Skenario_Donor : label skenario (1-5)
+        Sisa_Need_Supplier : kebutuhan yang tidak bisa dipenuhi dari pool
+    """
+    KAT_COL   = "Kategori ABC (Log-Benchmark - WMA)"
+    KEYS      = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
+
+    all_rows = []
+
+    for no_barang, group in df.groupby("No. Barang"):
+        group = group.copy()
+        idx_map = {row["City"]: idx for idx, row in group.iterrows()}
+
+        mask_sby = group["City"] == "SURABAYA"
+        mask_cab = ~mask_sby
+
+        # ── Hitung sisa SBY ──────────────────────────────────────────────────
+        sby_rows      = group.loc[mask_sby]
+        stock_sby     = sby_rows["Stock Cabang"].sum()
+        min_stock_sby = sby_rows["Min Stock"].sum()
+        sisa_sby      = max(0, stock_sby - min_stock_sby)
+
+        # ── Identifikasi donor non-SBY (overstock di atas Max Stock) ─────────
+        cab_rows = group.loc[mask_cab].copy()
+        donor_mask = (
+            (cab_rows["Status Stock"] == "Overstock") &
+            (cab_rows[KAT_COL] != "F")
+        )
+        donors = cab_rows.loc[donor_mask].copy()
+        donors["Qty_Bisa_Donor"] = (donors["Stock Cabang"] - donors["Max Stock"]).clip(lower=0).astype(int)
+        donors = donors[donors["Qty_Bisa_Donor"] > 0].sort_values("Qty_Bisa_Donor", ascending=False)
+
+        # ── Identifikasi penerima (understock, bukan SBY, bukan F) ───────────
+        recv_mask = (
+            (cab_rows["Status Stock"] == "Understock") &
+            (cab_rows[KAT_COL] != "F")
+        )
+        receivers = cab_rows.loc[recv_mask].copy()
+        receivers = receivers.sort_values("Persentase Stock", ascending=True)  # paling urgent dulu
+
+        total_need    = receivers["Add Stock"].sum()
+        total_donor   = donors["Qty_Bisa_Donor"].sum()
+        total_pool    = sisa_sby + total_donor
+
+        # ── Tentukan skenario ─────────────────────────────────────────────────
+        if total_need == 0:
+            skenario = "0 - TIDAK ADA KEBUTUHAN"
+        elif total_pool == 0:
+            skenario = "1 - KURANG (TIDAK ADA POOL)"
+        elif sisa_sby >= total_need and total_donor == 0:
+            skenario = "2 - SBY CUKUP"
+        elif sisa_sby >= total_need:
+            skenario = "2 - SBY CUKUP"
+        elif sisa_sby > 0 and total_donor > 0:
+            skenario = "3 - SBY TERBATAS + ADA DONOR"
+        elif sisa_sby == 0 and total_donor > 0:
+            skenario = "4 - HANYA DONOR CABANG"
+        else:
+            skenario = "5 - POOL TIDAK CUKUP"
+
+        # ── Alokasi distribusi ────────────────────────────────────────────────
+        # Tracking: qty_terima per penerima, qty_donor per donor
+        qty_terima  = {idx: 0 for idx in receivers.index}
+        qty_donor   = {idx: 0 for idx in donors.index}
+        sby_donated = 0
+        donor_to    = {idx: [] for idx in donors.index}    # donor → list penerima
+        sby_to      = []
+        terima_dari = {idx: [] for idx in receivers.index} # penerima → list sumber
+
+        sisa_sby_pool  = float(sisa_sby)
+        sisa_need = receivers["Add Stock"].copy().astype(float)
+
+        for r_idx, r_row in receivers.iterrows():
+            need = sisa_need[r_idx]
+            if need <= 0:
+                continue
+
+            # 1. Ambil dari SBY dulu
+            if sisa_sby_pool > 0:
+                take = min(need, sisa_sby_pool)
+                alloc = int(np.ceil(take))
+                qty_terima[r_idx] += alloc
+                sby_donated       += alloc
+                sby_to.append(r_row["City"])
+                terima_dari[r_idx].append("SURABAYA")
+                sisa_sby_pool     -= alloc
+                need              -= alloc
+
+            if need <= 0:
+                continue
+
+            # 2. Ambil dari donor non-SBY (urut terbesar stok dulu)
+            for d_idx, d_row in donors.iterrows():
+                if need <= 0:
+                    break
+                avail = d_row["Qty_Bisa_Donor"] - qty_donor.get(d_idx, 0)
+                if avail <= 0:
+                    continue
+                take  = min(need, avail)
+                alloc = int(np.ceil(take))
+                qty_terima[r_idx]    += alloc
+                qty_donor[d_idx]     = qty_donor.get(d_idx, 0) + alloc
+                donor_to[d_idx].append(r_row["City"])
+                terima_dari[r_idx].append(d_row["City"])
+                need -= alloc
+
+            sisa_need[r_idx] = max(0, need)
+
+        # ── Hitung sisa need supplier ─────────────────────────────────────────
+        sisa_supplier_total = sum(
+            max(0, r_row["Add Stock"] - qty_terima.get(r_idx, 0))
+            for r_idx, r_row in receivers.iterrows()
+        )
+
+        # ── Susun hasil per baris ─────────────────────────────────────────────
+        first = group.iloc[0]
+        meta  = {k: first[k] for k in KEYS if k in group.columns}
+
+        for idx, row in group.iterrows():
+            city = row["City"]
+            is_sby = (city == "SURABAYA")
+
+            # donor info
+            if is_sby:
+                d_to   = ", ".join(sby_to) if sby_to else "-"
+                d_qty  = int(sby_donated)
+            elif idx in donor_to:
+                d_to   = ", ".join(donor_to[idx]) if donor_to[idx] else "-"
+                d_qty  = int(qty_donor.get(idx, 0))
+            else:
+                d_to  = "-"
+                d_qty = 0
+
+            # receiver info
+            r_from = ", ".join(terima_dari.get(idx, [])) if terima_dari.get(idx) else "-"
+            r_qty  = int(qty_terima.get(idx, 0))
+
+            # per-city sisa need
+            if idx in receivers.index:
+                city_sisa = int(max(0, row["Add Stock"] - r_qty))
+            else:
+                city_sisa = 0
+
+            rec = {**meta}
+            rec.update({
+                "City":                row["City"],
+                "Kategori ABC":        row.get(KAT_COL, "-"),
+                "Stock Cabang":        int(row["Stock Cabang"]),
+                "Min Stock":           int(row["Min Stock"]),
+                "Max Stock":           int(row["Max Stock"]),
+                "Add Stock":           int(row["Add Stock"]),
+                "Status Stock":        row["Status Stock"],
+                "Persentase Stock":    row.get("Persentase Stock", 0),
+                "Qty_Bisa_Donor":      int(row["Stock Cabang"] - row["Max Stock"]) if row["Status Stock"] == "Overstock" and row.get(KAT_COL) != "F" else 0,
+                "Donor_Ke":            d_to,
+                "Qty_Donor":           d_qty,
+                "Terima_Dari":         r_from,
+                "Qty_Terima":          r_qty,
+                "Sisa_Need_Supplier":  city_sisa,
+                "Skenario_Donor":      skenario,
+                "Total_Pool":          int(total_pool),
+                "Total_Need":          int(total_need),
+            })
+            all_rows.append(rec)
+
+    return pd.DataFrame(all_rows)
