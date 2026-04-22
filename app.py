@@ -33,6 +33,7 @@ page = st.sidebar.radio(
         "Hasil Analisa Stock V2",
         "Analisis Donor Stock",
         "Hasil Analisa ABC",
+        "Analisis Produk Baru",
         "Hasil Analisis Margin",
     ),
     help="Pilih halaman untuk ditampilkan.",
@@ -55,6 +56,9 @@ _defaults = {
     "stock_v2_result":       None,
     "stock_v2_bulan_cols":   [],
     "stock_v2_pivot_df":     pd.DataFrame(),
+    # Produk Baru
+    "items_df":              pd.DataFrame(),
+    "new_product_result":    None,
 }
 for key, default in _defaults.items():
     if key not in st.session_state:
@@ -89,6 +93,10 @@ elif page == "Analisis Donor Stock":
 
 elif page == "Hasil Analisa ABC":
     from pages.abc_analysis import render
+    render()
+
+elif page == "Analisis Produk Baru":
+    from pages.new_product_analysis import render
     render()
 
 elif page == "Hasil Analisis Margin":
