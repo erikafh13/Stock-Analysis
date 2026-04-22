@@ -175,7 +175,7 @@ def render():
                 }
                 style_cols = {}
                 for c in city_df.columns:
-                    if c == "Status Stock":      style_cols[c] = _highlight_status_stock
+                    if c == "Status Stock":      style_cols[c] = highlight_status_stock
                     elif c == "Kategori ABC":    style_cols[c] = highlight_kategori_abc_log
                     elif c == "Skenario_Donor":  style_cols[c] = _highlight_skenario
                     elif c == "Donor_Ke":        style_cols[c] = _highlight_donor_ke
