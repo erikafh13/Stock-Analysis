@@ -31,6 +31,7 @@ from .analysis import (
     calculate_add_stock_v2,
     calculate_suggested_po_v2,
     calculate_all_summary_v2,
+    calculate_persentase_stock,
     # Donor
     calculate_donor_distribution,
     get_status_stock,
