@@ -202,8 +202,8 @@ Cabang dengan status **Understock** → stoknya di bawah Min Stock.
 
 **④ Cara pembagian:**
 - Penerima yang paling kritis (% stock terkecil) **mendapat prioritas pertama**
-- Untuk tiap penerima, donor dipilih berdasarkan **urutan jarak** yang Anda atur di sidebar
-- Jika ada **aturan larangan** (sidebar), donor tersebut dilewati
+- Untuk tiap penerima, donor dipilih berdasarkan **urutan jarak** yang Anda atur
+- Jika ada **aturan larangan**, donor tersebut dilewati
 - Jika pool habis sebelum semua terpenuhi → sisanya masuk ke kolom **Sisa PO Supplier**
 
 ---
@@ -226,72 +226,59 @@ Cabang dengan status **Understock** → stoknya di bawah Min Stock.
 | **Skenario** | Kondisi distribusi SKU ini (lihat legenda) |
 | **Total Pool** | Total stok yang bisa dibagikan untuk SKU ini |
 | **Total Need** | Total kebutuhan semua cabang understock untuk SKU ini |
-
----
-
-### Arti Skenario:
-
-| Warna | Skenario | Artinya |
-|---|---|---|
-| 🟢 Hijau | **0 - TIDAK ADA KEBUTUHAN** | Semua cabang aman, tidak ada yang perlu kirim |
-| 🔵 Biru | **2 - SBY CUKUP** | Sisa stok SBY lebih dari cukup untuk semua cabang |
-| 🟡 Kuning | **3 - SBY TERBATAS + ADA DONOR** | SBY kurang, dibantu donor cabang lain |
-| 🟠 Oranye | **4 - HANYA DONOR CABANG** | SBY tidak bisa kirim, distribusi dari donor cabang saja |
-| 🔴 Merah muda | **5 - POOL TIDAK CUKUP** | Pool ada tapi tidak cukup — sebagian terpenuhi, sisa PO |
-| 🔴 Merah | **1 - KURANG** | Tidak ada pool sama sekali — semua harus PO ke supplier |
         """)
 
-    # ── Sidebar: Aturan & Jarak ────────────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("---")
-        st.subheader("⚙️ Pengaturan Donor")
+    # ── Init Session State ─────────────────────────────────────────────────────
+    if "donor_rules" not in st.session_state:
+        st.session_state["donor_rules"] = _default_rules()
+    if "donor_distance" not in st.session_state:
+        st.session_state["donor_distance"] = {k: list(v) for k, v in DEFAULT_DISTANCE_PRIORITY.items()}
+
+    rules    = st.session_state["donor_rules"]
+    distance = st.session_state["donor_distance"]
+
+    # ── Pengaturan Donor — di halaman utama ────────────────────────────────────
+    st.markdown("---")
+    with st.expander("⚙️ Pengaturan Donor Antar Cabang", expanded=False):
         cfg1, cfg2 = st.tabs(["🚫 Aturan Kirim", "📍 Prioritas Jarak"])
-
-        # Init session state
-        if "donor_rules" not in st.session_state:
-            st.session_state["donor_rules"] = _default_rules()
-        if "donor_distance" not in st.session_state:
-            st.session_state["donor_distance"] = {k: list(v) for k, v in DEFAULT_DISTANCE_PRIORITY.items()}
-
-        rules    = st.session_state["donor_rules"]
-        distance = st.session_state["donor_distance"]
 
         with cfg1:
             st.caption("✅ Centang = **BOLEH** kirim. Kosong = **TIDAK BOLEH**.")
-            for dcity in ALL_CITIES:
-                st.markdown(f"**{dcity} kirim ke:**")
-                for rcity in ALL_CITIES:
-                    if dcity == rcity:
-                        continue
-                    key = f"rule_{dcity}_{rcity}"
-                    cur = rules.get(dcity, {}).get(rcity, True)
-                    rules[dcity][rcity] = st.checkbox(rcity, value=cur, key=key)
-                st.markdown("---")
+            cols_rule = st.columns(len(ALL_CITIES))
+            for i, dcity in enumerate(ALL_CITIES):
+                with cols_rule[i]:
+                    st.markdown(f"**{dcity}**")
+                    for rcity in ALL_CITIES:
+                        if dcity == rcity:
+                            continue
+                        key = f"rule_{dcity}_{rcity}"
+                        cur = rules.get(dcity, {}).get(rcity, True)
+                        rules[dcity][rcity] = st.checkbox(f"→ {rcity}", value=cur, key=key)
             st.session_state["donor_rules"] = rules
 
         with cfg2:
             st.caption("Atur urutan prioritas donor per penerima. **Urutan 1 = paling dekat/prioritas utama.**")
-            for rcity in ALL_CITIES:
-                if rcity == "SURABAYA":
-                    continue
-                st.markdown(f"**{rcity} — urutan donor:**")
-                cur_order = distance.get(rcity, [c for c in ALL_CITIES if c != rcity])
-                others    = [c for c in ALL_CITIES if c != rcity]
-                new_order = []
-                for rank in range(len(others)):
-                    remaining = [c for c in others if c not in new_order]
-                    if not remaining:
-                        break
-                    default_choice = cur_order[rank] if rank < len(cur_order) and cur_order[rank] in remaining else remaining[0]
-                    sel = st.selectbox(
-                        f"Prioritas {rank+1}",
-                        options=remaining,
-                        index=remaining.index(default_choice),
-                        key=f"dist_{rcity}_{rank}",
-                    )
-                    new_order.append(sel)
-                distance[rcity] = new_order
-                st.markdown("---")
+            cities_recv = [c for c in ALL_CITIES if c != "SURABAYA"]
+            cols_dist = st.columns(len(cities_recv))
+            for i, rcity in enumerate(cities_recv):
+                with cols_dist[i]:
+                    st.markdown(f"**{rcity}**")
+                    cur_order = distance.get(rcity, [c for c in ALL_CITIES if c != rcity])
+                    others    = [c for c in ALL_CITIES if c != rcity]
+                    new_order = []
+                    for rank in range(len(others)):
+                        remaining = [c for c in others if c not in new_order]
+                        if not remaining:
+                            break
+                        default_choice = cur_order[rank] if rank < len(cur_order) and cur_order[rank] in remaining else remaining[0]
+                        sel = st.selectbox(
+                            f"Prioritas {rank+1}",
+                            options=remaining,
+                            index=remaining.index(default_choice),
+                            key=f"dist_{rcity}_{rank}",
+                        )
+                        new_order.append(sel)
+                    distance[rcity] = new_order
             st.session_state["donor_distance"] = distance
 
     rules    = st.session_state["donor_rules"]
@@ -434,7 +421,6 @@ Cabang dengan status **Understock** → stoknya di bawah Min Stock.
             piv.columns = [f"{CITY_SHORT.get(city,city)}_{metric}" for metric, city in piv.columns]
             piv = piv.reset_index()
 
-            # Kolom ALL
             sku_agg = ddisp.groupby("No. Barang").agg(
                 All_Total_Need    = ("Total_Need",       "first"),
                 All_Total_Pool    = ("Total_Pool",       "first"),
