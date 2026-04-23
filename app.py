@@ -6,12 +6,18 @@ import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Analisis Stock & ABC")
 
-# Hide sidebar image, title bawaan Streamlit, dan nav otomatis
+# Hide nav otomatis bawaan Streamlit (bukan gambar/judul kita)
 st.markdown("""
     <style>
         [data-testid="stSidebarNav"] { display: none; }
     </style>
 """, unsafe_allow_html=True)
+
+st.sidebar.image(
+    "https://eq-cdn.equiti-me.com/website/images/What_does_a_stock_split_mean.2e16d0ba.fill-1600x900.jpg",
+    use_container_width=True,
+)
+st.sidebar.title("Analisis Stock dan ABC")
 
 page = st.sidebar.radio(
     "Menu Navigasi:",
