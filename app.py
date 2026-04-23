@@ -1,29 +1,17 @@
 """
 app.py  ←  Entry point utama aplikasi Streamlit.
-
-Struktur project:
-    stock_app/
-    ├── app.py
-    ├── utils/
-    │   ├── __init__.py
-    │   ├── gdrive.py
-    │   └── analysis.py
-    └── pages/
-        ├── input_data.py
-        ├── stock_analysis.py      ← Logika Lama
-        ├── stock_analysis_v2.py   ← Logika Baru (V2)
-        └── abc_analysis.py
 """
 
 import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Analisis Stock & ABC")
 
-st.sidebar.image(
-    "https://eq-cdn.equiti-me.com/website/images/What_does_a_stock_split_mean.2e16d0ba.fill-1600x900.jpg",
-    use_container_width=True,
-)
-st.sidebar.title("Analisis Stock dan ABC")
+# Hide sidebar image, title bawaan Streamlit, dan nav otomatis
+st.markdown("""
+    <style>
+        [data-testid="stSidebarNav"] { display: none; }
+    </style>
+""", unsafe_allow_html=True)
 
 page = st.sidebar.radio(
     "Menu Navigasi:",
@@ -32,9 +20,7 @@ page = st.sidebar.radio(
         "Hasil Analisa Stock",
         "Hasil Analisa Stock V2",
         "Analisis Donor Stock",
-        "Hasil Analisa ABC",
         "Analisis Produk Baru",
-        "Hasil Analisis Margin",
     ),
     help="Pilih halaman untuk ditampilkan.",
 )
@@ -91,14 +77,6 @@ elif page == "Analisis Donor Stock":
     from pages.stock_donor import render
     render()
 
-elif page == "Hasil Analisa ABC":
-    from pages.abc_analysis import render
-    render()
-
 elif page == "Analisis Produk Baru":
     from pages.new_product_analysis import render
     render()
-
-elif page == "Hasil Analisis Margin":
-    st.title("💰 Hasil Analisis Margin (Placeholder)")
-    st.info("Halaman ini adalah placeholder untuk analisis margin yang akan dikembangkan selanjutnya.")
