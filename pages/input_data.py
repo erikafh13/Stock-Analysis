@@ -13,7 +13,6 @@ from utils import (
     FOLDER_PENJUALAN,
     FOLDER_PRODUK,
     FOLDER_STOCK,
-    FOLDER_PORTAL,
 )
 
 
@@ -97,30 +96,3 @@ def render(drive_service):
 
     if not st.session_state.df_stock.empty:
         st.dataframe(st.session_state.df_stock.head())
-
-    # ── 4. Data Portal (Margin) ────────────────────────────────────────────────
-    st.header("4. Data Portal (Margin)")
-    with st.spinner("Mencari file portal di Google Drive..."):
-        portal_files = list_files_in_folder(drive_service, FOLDER_PORTAL)
-
-    selected_portal = st.selectbox(
-        "Pilih file Portal dari Google Drive (pilih 1 file):",
-        options=[None] + portal_files,
-        format_func=lambda x: x["name"] if x else "Pilih file",
-    )
-    if st.button("Muat Data Portal"):
-        if selected_portal:
-            with st.spinner(f"Memuat file {selected_portal['name']}..."):
-                df_portal = download_and_read(drive_service, selected_portal["id"], selected_portal["name"])
-                if not df_portal.empty:
-                    st.session_state.df_portal = df_portal
-                    st.session_state.df_portal_analyzed = __import__("pandas").DataFrame()
-                    st.success(f"File portal '{selected_portal['name']}' berhasil dimuat.")
-                    st.dataframe(st.session_state.df_portal.head())
-                else:
-                    st.error(f"Gagal memuat file portal '{selected_portal['name']}'.")
-        else:
-            st.warning("⚠️ Harap pilih file portal terlebih dahulu.")
-
-    if "df_portal" in st.session_state and not st.session_state.df_portal.empty:
-        st.success("✅ Data portal telah dimuat.")
