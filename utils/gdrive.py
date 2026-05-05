@@ -79,12 +79,8 @@ def list_files_in_folder(_drive_service, folder_id: str) -> list:
 
 
 @st.cache_data(ttl=600)
-def download_file_from_gdrive(_drive_service, file_id: str) -> BytesIO | None:
-    """
-    Download file dari Google Drive ke BytesIO.
-    FIX: drive_service sekarang dioper sebagai parameter eksplisit
-         (tidak lagi bergantung pada global scope) agar cache aman.
-    """
+def download_file_from_gdrive(_drive_service, file_id: str) -> bytes | None:
+    """Cache raw bytes, bukan BytesIO, supaya pointer selalu fresh."""
     try:
         def _download():
             request = _drive_service.files().get_media(fileId=file_id)
@@ -93,8 +89,7 @@ def download_file_from_gdrive(_drive_service, file_id: str) -> BytesIO | None:
             done = False
             while not done:
                 _, done = downloader.next_chunk()
-            fh.seek(0)
-            return fh
+            return fh.getvalue()   # ← simpan bytes mentah ke cache
         return _with_backoff(_download)
     except Exception as e:
         st.error(f"Gagal mengunduh file {file_id}. Error: {e}")
@@ -102,11 +97,11 @@ def download_file_from_gdrive(_drive_service, file_id: str) -> BytesIO | None:
 
 
 # ── Read Helper ────────────────────────────────────────────────────────────────
-def download_and_read(_drive_service, file_id: str, file_name: str, **kwargs) -> pd.DataFrame:
-    """Download lalu baca sebagai DataFrame (CSV atau Excel)."""
-    fh = download_file_from_gdrive(_drive_service, file_id)
-    if fh is None:
+def download_and_read(_drive_service, file_id, file_name, **kwargs):
+    raw = download_file_from_gdrive(_drive_service, file_id)
+    if raw is None:
         return pd.DataFrame()
+    fh = BytesIO(raw)          # ← fresh BytesIO dari bytes yang di-cache
     if file_name.endswith(".csv"):
         return pd.read_csv(fh, **kwargs)
     return pd.read_excel(fh, **kwargs)
@@ -114,20 +109,37 @@ def download_and_read(_drive_service, file_id: str, file_name: str, **kwargs) ->
 
 def read_produk_file(_drive_service, file_id: str) -> pd.DataFrame:
     """Baca file produk referensi dari Google Drive."""
-    fh = download_file_from_gdrive(_drive_service, file_id)
-    if fh is None:
+    raw = download_file_from_gdrive(_drive_service, file_id)
+    if raw is None:
         return pd.DataFrame()
-    df = pd.read_excel(fh, sheet_name="Sheet1 (2)", skiprows=6, usecols=[0, 1, 2, 3])
+
+    fh = BytesIO(raw)  # ← WAJIB kalau return berupa bytes
+
+    df = pd.read_excel(
+        fh,
+        sheet_name="Sheet1 (2)",
+        skiprows=6,
+        usecols=[0, 1, 2, 3]
+    )
     df.columns = ["No. Barang", "BRAND Barang", "Kategori Barang", "Nama Barang"]
     return df
 
 
 def read_stock_file(_drive_service, file_id: str) -> pd.DataFrame:
     """Baca file stock dari Google Drive."""
-    fh = download_file_from_gdrive(_drive_service, file_id)
-    if fh is None:
+    raw = download_file_from_gdrive(_drive_service, file_id)
+    if raw is None:
         return pd.DataFrame()
-    df = pd.read_excel(fh, sheet_name="Sheet1", skiprows=9, header=None)
+
+    fh = BytesIO(raw)  # ← WAJIB juga di sini
+
+    df = pd.read_excel(
+        fh,
+        sheet_name="Sheet1",
+        skiprows=9,
+        header=None
+    )
+
     header = [
         "No. Barang", "Keterangan Barang",
         "A - ITC", "AT - TRANSIT ITC", "B", "BT - TRANSIT JKT",
@@ -135,5 +147,6 @@ def read_stock_file(_drive_service, file_id: str) -> pd.DataFrame:
         "E - JOG", "ET - TRANSIT JOG", "F - MLG", "FT - TRANSIT MLG",
         "H - BALI", "HT - TRANSIT BALI", "X", "Y - SBY", "Y3 - Display Y", "YT - TRANSIT Y",
     ]
-    df.columns = header[: len(df.columns)]
+
+    df.columns = header[:len(df.columns)]
     return df
