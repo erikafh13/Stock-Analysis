@@ -93,7 +93,15 @@ def render():
     if "Kategori Barang" in produk_ref.columns:
         produk_ref["Kategori Barang"] = produk_ref["Kategori Barang"].astype(str).str.strip().str.upper()
     penjualan["City"]       = penjualan["City"].astype(str).str.strip().str.upper()
-    penjualan["Tgl Faktur"] = pd.to_datetime(penjualan["Tgl Faktur"], errors="coerce")
+    # Coba format eksplisit '1 May 2026' / '15 Dec 2025' dulu,
+    # fallback ke inferensi otomatis untuk format lain.
+    _tgl_raw = penjualan["Tgl Faktur"]
+    _parsed  = pd.to_datetime(_tgl_raw, format="%d %b %Y", errors="coerce")
+    _mask_nat = _parsed.isna()
+    if _mask_nat.any():
+        _parsed = _parsed.copy()
+        _parsed[_mask_nat] = pd.to_datetime(_tgl_raw[_mask_nat], errors="coerce")
+    penjualan["Tgl Faktur"] = _parsed
 
     st.markdown("---")
 
@@ -181,7 +189,15 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
             .sum().unstack(fill_value=0).reset_index()
         )
         full = pd.merge(full, monthly, on=["City", "No. Barang"], how="left")
-        
+
+        # ── PENTING: rename kolom Period SEBELUM fillna ─────────────────────────
+        # fillna loop di bawah akan mengubah kolom pd.Period menjadi string
+        # sehingga isinstance(c, pd.Period) tidak akan mendeteksinya lagi.
+        period_cols = sorted([c for c in full.columns if isinstance(c, pd.Period)])
+        rename_map  = {c: f"{BULAN_INDONESIA[c.month]} {c.year}" for c in period_cols}
+        full.rename(columns=rename_map, inplace=True)
+        bulan_columns_renamed = [rename_map[c] for c in period_cols]
+
         for col in full.columns:
             try:
                 if pd.api.types.is_numeric_dtype(full[col]):
@@ -190,11 +206,6 @@ def _run_analysis_v2(penjualan, produk_ref, df_stock, end_date):
                     full[col] = full[col].astype(str).fillna("")
             except Exception as e:
                 print(f"Error di kolom {col}: {e}")
-
-        period_cols = sorted([c for c in full.columns if isinstance(c, pd.Period)])
-        rename_map  = {c: f"{BULAN_INDONESIA[c.month]} {c.year}" for c in period_cols}
-        full.rename(columns=rename_map, inplace=True)
-        bulan_columns_renamed = [rename_map[c] for c in period_cols]
 
         full.rename(columns={"AVG WMA": "SO WMA", "AVG Mean": "SO Mean"}, inplace=True)
         full["SO Total"] = full["SO WMA"]
