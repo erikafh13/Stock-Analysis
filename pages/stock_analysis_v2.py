@@ -481,7 +481,7 @@ def _render_pivot_v2(result, bulan_cols, KAT_COL):
         # Nama bulan Indonesia title-case agar tidak kapital semua
         BULAN_TITLE = {
             "JANUARI": "Jan", "FEBRUARI": "Feb", "MARET": "Mar",
-            "APRIL": "Apr", "MEI": "Mei", "JUNI": "Jun",
+            "APRIL": "Apr", "May": "Mei", "JUNI": "Jun",
             "JULI": "Jul", "AGUSTUS": "Agu", "SEPTEMBER": "Sep",
             "OKTOBER": "Okt", "NOVEMBER": "Nov", "DESEMBER": "Des",
         }
