@@ -27,6 +27,7 @@ page = st.sidebar.radio(
         "Hasil Analisa Stock V2",
         "Analisis Donor Stock",
         "Analisis Produk Baru",
+        "Analisis ABC V3 (Platform)",
     ),
     help="Pilih halaman untuk ditampilkan.",
 )
@@ -41,6 +42,7 @@ _defaults = {
     "stock_filename":        "",
     "stock_analysis_result": None,
     "abc_analysis_result":   None,
+    "abc_v3_result":         None,
     "bulan_columns_stock":   [],
     "df_portal_analyzed":    pd.DataFrame(),
     "stock_pivot_df":        pd.DataFrame(),
@@ -85,4 +87,8 @@ elif page == "Analisis Donor Stock":
 
 elif page == "Analisis Produk Baru":
     from pages.new_product_analysis import render
+    render()
+
+elif page == "Analisis ABC V3 (Platform)":
+    from pages.abc_analysis_v3 import render
     render()
