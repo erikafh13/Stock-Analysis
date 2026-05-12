@@ -1,7 +1,7 @@
 """
 pages/abc_analysis_v3.py
 Halaman Hasil Analisa ABC V3 — identik dengan V2, ditambah 2 kolom ABC
-per platform (Online / Offline) di setiap cabang dan ALL.
+per platform (Online / Offline) di tabel per kota dan tabel gabungan.
 
 Mapping Platform:
   ONLINE  : Nama Pelanggan diawali "AIRPAY"
@@ -12,23 +12,6 @@ Mapping Platform:
 """
 
 import re
-
-_ONLINE_FAKTUR_RE = re.compile(r"^(AO|BO|DO|EO|FO|HO)", re.IGNORECASE)
-
-
-def _map_platform(row) -> str:
-    nama   = str(row.get("Nama Pelanggan", "")).strip().upper()
-    faktur = str(row.get("No. Faktur", "")).strip().upper()
-    if nama.startswith("AIRPAY"):
-        return "Online"
-    if "- SHOPEE" in nama or nama.endswith("SHOPEE"):
-        return "Online"
-    if nama.startswith("TOKOPEDIA"):
-        return "Online"
-    if _ONLINE_FAKTUR_RE.match(faktur):
-        return "Online"
-    return "Offline"
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -43,7 +26,24 @@ from utils import (
     highlight_kategori_abc_log,
 )
 
+# ── Mapping platform ───────────────────────────────────────────────────────────
+_ONLINE_FAKTUR_RE = re.compile(r"^(AO|BO|DO|EO|FO|HO)", re.IGNORECASE)
 
+def _map_platform(row) -> str:
+    nama   = str(row.get("Nama Pelanggan", "")).strip().upper()
+    faktur = str(row.get("No. Faktur", "")).strip().upper()
+    if nama.startswith("AIRPAY"):
+        return "Online"
+    if "- SHOPEE" in nama or nama.endswith("SHOPEE"):
+        return "Online"
+    if nama.startswith("TOKOPEDIA"):
+        return "Online"
+    if _ONLINE_FAKTUR_RE.match(faktur):
+        return "Online"
+    return "Offline"
+
+
+# ── Entry Point ────────────────────────────────────────────────────────────────
 def render():
     st.title("📊 Analisis ABC V3 — Log-Benchmark + Platform (Online / Offline)")
     tab1, tab2 = st.tabs(["Hasil Tabel", "Dashboard"])
@@ -60,7 +60,7 @@ def _render_table_tab():
         st.warning("⚠️ Harap muat file **Penjualan** dan **Produk Referensi** di halaman **'Input Data'** terlebih dahulu.")
         st.stop()
 
-    # Preprocessing
+    # Preprocessing — identik V2 + mapping platform
     so_df      = st.session_state.df_penjualan.copy()
     produk_ref = st.session_state.produk_ref.copy()
 
@@ -71,7 +71,7 @@ def _render_table_tab():
     so_df.rename(columns={"Qty": "Kuantitas"}, inplace=True, errors="ignore")
     so_df["Nama Dept"] = so_df.apply(map_nama_dept, axis=1)
     so_df["City"]      = so_df["Nama Dept"].apply(map_city)
-    so_df["Platform"]  = so_df.apply(_map_platform, axis=1)   # ← V3: mapping platform
+    so_df["Platform"]  = so_df.apply(_map_platform, axis=1)   # ← V3
 
     if "Kategori Barang" in produk_ref.columns:
         produk_ref["Kategori Barang"] = produk_ref["Kategori Barang"].astype(str).str.strip().str.upper()
@@ -91,10 +91,10 @@ def _render_table_tab():
     if st.button("Jalankan Analisa ABC V3 (Log-Benchmark + Platform)"):
         _run_abc_analysis(so_df, produk_ref, end_date_input)
 
-    if st.session_state.abc_analysis_result is None:
+    if st.session_state.get("abc_v3_result") is None:
         return
 
-    result_display = st.session_state.abc_analysis_result.copy()
+    result_display = st.session_state.abc_v3_result.copy()
     result_display = result_display[result_display["City"] != "OTHERS"]
 
     # Filter
@@ -107,8 +107,8 @@ def _render_table_tab():
 
     KEYS = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
 
-    # Tabel per kota
-    st.header("Hasil Analisis ABC per Kota")
+    # Tabel per kota — identik V2, tambah 2 kolom Online/Offline di col_order
+    st.header("Hasil Analisis ABC V3 per Kota")
     for city in sorted(result_display["City"].unique()):
         with st.expander(f"🏙️ Lihat Hasil ABC untuk Kota: {city}"):
             city_df = result_display[result_display["City"] == city]
@@ -118,6 +118,9 @@ def _render_table_tab():
                 "Kategori ABC (Log-Benchmark - Mean)", "Kategori ABC (Log-Benchmark - WMA)",
                 "Log (10) Mean", "Avg Log Mean", "Ratio Log Mean",
                 "Log (10) WMA",  "Avg Log WMA",  "Ratio Log WMA",
+                # V3: 2 kolom tambahan
+                "Kategori ABC (Log-Benchmark - WMA)_Online",
+                "Kategori ABC (Log-Benchmark - WMA)_Offline",
             ]
             display_cols = [c for c in col_order if c in city_df.columns]
             df_show = city_df[display_cols]
@@ -133,6 +136,10 @@ def _render_table_tab():
                 style = style.apply(lambda x: x.map(highlight_kategori_abc_log), subset=["Kategori ABC (Log-Benchmark - Mean)"])
             if "Kategori ABC (Log-Benchmark - WMA)" in df_show.columns:
                 style = style.apply(lambda x: x.map(highlight_kategori_abc_log), subset=["Kategori ABC (Log-Benchmark - WMA)"])
+            if "Kategori ABC (Log-Benchmark - WMA)_Online" in df_show.columns:
+                style = style.apply(lambda x: x.map(highlight_kategori_abc_log), subset=["Kategori ABC (Log-Benchmark - WMA)_Online"])
+            if "Kategori ABC (Log-Benchmark - WMA)_Offline" in df_show.columns:
+                style = style.apply(lambda x: x.map(highlight_kategori_abc_log), subset=["Kategori ABC (Log-Benchmark - WMA)_Offline"])
             st.dataframe(style, use_container_width=True)
 
     # Tabel Pivot Gabungan
@@ -141,38 +148,42 @@ def _render_table_tab():
         _render_pivot_abc(result_display, KEYS, end_date_input)
 
 
+# ── Perhitungan ABC ────────────────────────────────────────────────────────────
 def _run_abc_analysis(so_df, produk_ref, end_date_input):
-    with st.spinner("Melakukan perhitungan analisis ABC..."):
+    with st.spinner("Melakukan perhitungan analisis ABC V3..."):
         end_dt   = pd.to_datetime(end_date_input)
         start_90 = end_dt - pd.DateOffset(days=89)
         df_90    = so_df[so_df["Tgl Faktur"].between(start_90, end_dt)]
 
         if df_90.empty:
             st.error("Tidak ada data penjualan pada rentang 90 hari yang dipilih.")
-            st.session_state.abc_analysis_result = None
+            st.session_state["abc_v3_result"] = None
             return
 
-        def _sales(start, end, col):
-            return (
-                df_90[df_90["Tgl Faktur"].between(start, end)]
-                .groupby(["City", "No. Barang"])["Kuantitas"]
-                .sum().reset_index(name=col)
-            )
-
-        r1_end, r1_start = end_dt, end_dt - pd.DateOffset(days=29)
+        r1_end, r1_start = end_dt,                          end_dt - pd.DateOffset(days=29)
         r2_end, r2_start = end_dt - pd.DateOffset(days=30), end_dt - pd.DateOffset(days=59)
         r3_end, r3_start = end_dt - pd.DateOffset(days=60), end_dt - pd.DateOffset(days=89)
 
-        sales_m1 = _sales(r1_start, r1_end, "Penjualan Bln 1")
-        sales_m2 = _sales(r2_start, r2_end, "Penjualan Bln 2")
-        sales_m3 = _sales(r3_start, r3_end, "Penjualan Bln 3")
+        # helper groupby penjualan dari df sumber tertentu
+        def _sales(df_src, start, end, col):
+            return (
+                df_src[df_src["Tgl Faktur"].between(start, end)]
+                .groupby(["City", "No. Barang"])["Kuantitas"]
+                .sum().reset_index(name=col)
+            )
 
         produk_ref.rename(columns={"Keterangan Barang": "Nama Barang", "Nama Kategori Barang": "Kategori Barang"}, inplace=True, errors="ignore")
         barang_list = produk_ref[["No. Barang", "BRAND Barang", "Kategori Barang", "Nama Barang"]].drop_duplicates()
         city_list   = so_df["City"].dropna().unique()
 
         kombinasi = pd.MultiIndex.from_product([city_list, barang_list["No. Barang"]], names=["City", "No. Barang"]).to_frame(index=False)
-        grouped   = pd.merge(kombinasi, barang_list, on="No. Barang", how="left")
+
+        # ── Overall (identik V2) ───────────────────────────────────────────────
+        sales_m1 = _sales(df_90, r1_start, r1_end, "Penjualan Bln 1")
+        sales_m2 = _sales(df_90, r2_start, r2_end, "Penjualan Bln 2")
+        sales_m3 = _sales(df_90, r3_start, r3_end, "Penjualan Bln 3")
+
+        grouped = pd.merge(kombinasi, barang_list, on="No. Barang", how="left")
         for sm in [sales_m1, sales_m2, sales_m3]:
             grouped = pd.merge(grouped, sm, on=["City", "No. Barang"], how="left")
         grouped.fillna({"Penjualan Bln 1": 0, "Penjualan Bln 2": 0, "Penjualan Bln 3": 0}, inplace=True)
@@ -187,8 +198,6 @@ def _run_abc_analysis(so_df, produk_ref, end_date_input):
         res_mean = classify_abc_log_benchmark(grouped.copy(), metric_col="AVG Mean")
         res_wma  = classify_abc_log_benchmark(grouped.copy(), metric_col="AVG WMA")
 
-        MERGE_KEYS = ["City", "No. Barang", "BRAND Barang", "Kategori Barang", "Nama Barang",
-                      "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3", "AVG Mean", "AVG WMA"]
         result_final = res_mean.copy()
         wma_extra = [c for c in res_wma.columns
                      if any(x in c for x in ["Log-Benchmark - WMA", "Log (10) WMA", "Avg Log WMA", "Ratio Log WMA"])
@@ -202,20 +211,15 @@ def _run_abc_analysis(so_df, produk_ref, end_date_input):
             if col in result_final.columns:
                 result_final[col] = result_final[col].round(2)
 
-        # ── V3: hitung ABC per platform dan tambah 2 kolom per platform ───────
+        # ── V3: hitung ABC per platform dan merge 2 kolom ke result_final ─────
+        platform_sales_store = {}  # simpan untuk kebutuhan ALL di pivot
+
         for platform in ["Online", "Offline"]:
             df_plat = df_90[df_90["Platform"] == platform]
 
-            def _sales_plat(start, end, col):
-                return (
-                    df_plat[df_plat["Tgl Faktur"].between(start, end)]
-                    .groupby(["City", "No. Barang"])["Kuantitas"]
-                    .sum().reset_index(name=col)
-                )
-
-            s1 = _sales_plat(r1_start, r1_end, "Penjualan Bln 1")
-            s2 = _sales_plat(r2_start, r2_end, "Penjualan Bln 2")
-            s3 = _sales_plat(r3_start, r3_end, "Penjualan Bln 3")
+            s1 = _sales(df_plat, r1_start, r1_end, "Penjualan Bln 1")
+            s2 = _sales(df_plat, r2_start, r2_end, "Penjualan Bln 2")
+            s3 = _sales(df_plat, r3_start, r3_end, "Penjualan Bln 3")
 
             grp = pd.merge(kombinasi, barang_list, on="No. Barang", how="left")
             for sm in [s1, s2, s3]:
@@ -224,49 +228,43 @@ def _run_abc_analysis(so_df, produk_ref, end_date_input):
 
             grp["AVG Mean"] = (grp["Penjualan Bln 1"] + grp["Penjualan Bln 2"] + grp["Penjualan Bln 3"]) / 3
             grp["AVG WMA"]  = np.ceil(
-                grp["Penjualan Bln 1"] * 0.5 + grp["Penjualan Bln 2"] * 0.3 + grp["Penjualan Bln 3"] * 0.2
+                grp["Penjualan Bln 1"] * 0.5
+                + grp["Penjualan Bln 2"] * 0.3
+                + grp["Penjualan Bln 3"] * 0.2
             )
 
-            r_mean = classify_abc_log_benchmark(grp.copy(), metric_col="AVG Mean")
-            r_wma  = classify_abc_log_benchmark(grp.copy(), metric_col="AVG WMA")
+            r_wma = classify_abc_log_benchmark(grp.copy(), metric_col="AVG WMA")
 
-            mean_slim = r_mean[["City", "No. Barang", "Kategori ABC (Log-Benchmark - Mean)"]].rename(
-                columns={"Kategori ABC (Log-Benchmark - Mean)": f"Kategori ABC (Log-Benchmark - Mean)_{platform}"}
-            )
+            # Ambil hanya kolom ABC WMA, rename dengan suffix platform
             wma_slim = r_wma[["City", "No. Barang", "Kategori ABC (Log-Benchmark - WMA)"]].rename(
                 columns={"Kategori ABC (Log-Benchmark - WMA)": f"Kategori ABC (Log-Benchmark - WMA)_{platform}"}
             )
+            result_final = pd.merge(result_final, wma_slim, on=["City", "No. Barang"], how="left")
 
-            result_final = pd.merge(result_final, mean_slim, on=["City", "No. Barang"], how="left")
-            result_final = pd.merge(result_final, wma_slim,  on=["City", "No. Barang"], how="left")
+            # Simpan data penjualan per bulan platform untuk hitung ALL di pivot
+            platform_sales_store[platform] = grp[
+                ["City", "No. Barang", "Kategori Barang", "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
+            ].copy()
 
-            # Simpan penjualan per bulan platform untuk ALL di pivot
-            plat_bln = grp[["City", "No. Barang", "Kategori Barang",
-                             "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]].copy()
-            st.session_state[f"abc_v3_plat_{platform}"] = plat_bln
+        st.session_state["abc_v3_result"]          = result_final.copy()
+        st.session_state["abc_v3_platform_sales"]  = platform_sales_store
+        st.success("✅ Analisis ABC V3 (Log-Benchmark + Platform Online/Offline) berhasil dijalankan!")
 
-        st.session_state.abc_analysis_result = result_final.copy()
-        st.success("✅ Analisis ABC V3 (2 Metode Log-Benchmark + Platform) berhasil dijalankan!")
-
-        # Info mapping platform
         total_rows   = len(df_90)
         online_rows  = (df_90["Platform"] == "Online").sum()
         offline_rows = (df_90["Platform"] == "Offline").sum()
-        st.info(
-            f"📦 Total transaksi 90 hari: **{total_rows:,}** — "
-            f"Online: **{online_rows:,}** | Offline: **{offline_rows:,}**"
-        )
+        st.info(f"📦 Total transaksi 90 hari: **{total_rows:,}** — Online: **{online_rows:,}** | Offline: **{offline_rows:,}**")
 
 
+# ── Pivot Gabungan ─────────────────────────────────────────────────────────────
 def _render_pivot_abc(result_display, KEYS, end_date_input):
+    # pivot_values = semua kolom V2 + 2 kolom platform V3
     pivot_values = [
         "Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3", "AVG Mean", "AVG WMA",
         "Kategori ABC (Log-Benchmark - Mean)", "Ratio Log Mean", "Log (10) Mean", "Avg Log Mean",
         "Kategori ABC (Log-Benchmark - WMA)",  "Ratio Log WMA",  "Log (10) WMA",  "Avg Log WMA",
-        # V3: 2 kolom tambahan per platform
-        "Kategori ABC (Log-Benchmark - Mean)_Online",
+        # V3
         "Kategori ABC (Log-Benchmark - WMA)_Online",
-        "Kategori ABC (Log-Benchmark - Mean)_Offline",
         "Kategori ABC (Log-Benchmark - WMA)_Offline",
     ]
     existing_vals = [c for c in pivot_values if c in result_display.columns]
@@ -274,7 +272,7 @@ def _render_pivot_abc(result_display, KEYS, end_date_input):
     pivot.columns = [f"{lv1}_{lv0}" for lv0, lv1 in pivot.columns]
     pivot.reset_index(inplace=True)
 
-    # ALL summary
+    # ALL summary — identik V2
     total = result_display.groupby(KEYS).agg({
         "Penjualan Bln 1": "sum", "Penjualan Bln 2": "sum", "Penjualan Bln 3": "sum"
     }).reset_index()
@@ -299,40 +297,36 @@ def _render_pivot_abc(result_display, KEYS, end_date_input):
         if col in total_final.columns:
             total_final[col] = total_final[col].round(2)
 
-    # V3: ALL per platform — hitung dari penjualan platform yang disimpan saat run
+    # V3: ALL per platform — sum penjualan platform semua kota → classify
+    platform_sales_store = st.session_state.get("abc_v3_platform_sales", {})
     for platform in ["Online", "Offline"]:
-        plat_bln = st.session_state.get(f"abc_v3_plat_{platform}")
+        plat_bln = platform_sales_store.get(platform)
         if plat_bln is None:
             continue
 
         plat_total = plat_bln.groupby(KEYS).agg({
             "Penjualan Bln 1": "sum", "Penjualan Bln 2": "sum", "Penjualan Bln 3": "sum"
         }).reset_index()
-        plat_total["AVG Mean"] = (plat_total["Penjualan Bln 1"] + plat_total["Penjualan Bln 2"] + plat_total["Penjualan Bln 3"]) / 3
-        plat_total["AVG WMA"]  = np.ceil(
-            plat_total["Penjualan Bln 1"] * 0.5 + plat_total["Penjualan Bln 2"] * 0.3 + plat_total["Penjualan Bln 3"] * 0.2
+        plat_total["AVG WMA"] = np.ceil(
+            plat_total["Penjualan Bln 1"] * 0.5
+            + plat_total["Penjualan Bln 2"] * 0.3
+            + plat_total["Penjualan Bln 3"] * 0.2
         )
-        for col in ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3", "AVG Mean", "AVG WMA"]:
-            if col in plat_total.columns:
-                plat_total[col] = plat_total[col].round(0).astype(int)
-
         plat_total["City"] = "ALL"
-        r_mean = classify_abc_log_benchmark(plat_total.copy(), metric_col="AVG Mean")
-        r_wma  = classify_abc_log_benchmark(plat_total.copy(), metric_col="AVG WMA")
 
-        mean_slim = r_mean[KEYS + ["Kategori ABC (Log-Benchmark - Mean)"]].rename(
-            columns={"Kategori ABC (Log-Benchmark - Mean)": f"Kategori ABC (Log-Benchmark - Mean)_{platform}"}
-        )
+        r_wma = classify_abc_log_benchmark(plat_total.copy(), metric_col="AVG WMA")
+
         wma_slim = r_wma[KEYS + ["Kategori ABC (Log-Benchmark - WMA)"]].rename(
             columns={"Kategori ABC (Log-Benchmark - WMA)": f"Kategori ABC (Log-Benchmark - WMA)_{platform}"}
         )
-        total_final = pd.merge(total_final, mean_slim, on=KEYS, how="left")
-        total_final = pd.merge(total_final, wma_slim,  on=KEYS, how="left")
+        total_final = pd.merge(total_final, wma_slim, on=KEYS, how="left")
 
+    # Rename semua kolom ALL dan gabung ke pivot — identik V2
     total_final.columns = [f"All_{c}" if c not in KEYS else c for c in total_final.columns]
     pivot_final = pd.merge(pivot, total_final, on=KEYS, how="left")
 
-    df_style = pivot_final.copy()
+    # Styling — identik V2
+    df_style   = pivot_final.copy()
     num_cols   = [c for c in df_style.columns if c not in KEYS and pd.api.types.is_numeric_dtype(df_style[c])
                   and not any(x in c for x in ["Ratio", "Log", "Avg Log"])]
     float_cols = [c for c in df_style.columns if c not in KEYS and any(x in c for x in ["Ratio", "Log", "Avg Log"])]
@@ -348,27 +342,27 @@ def _render_pivot_abc(result_display, KEYS, end_date_input):
     st.dataframe(df_style, column_config=col_cfg, use_container_width=True)
 
     # Download
-    st.header("💾 Unduh Hasil Analisis ABC")
+    st.header("💾 Unduh Hasil Analisis ABC V3")
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_style.to_excel(writer, sheet_name="All Cities Pivot", index=False)
+        df_style.to_excel(writer, sheet_name="All Cities Pivot V3", index=False)
         for city in sorted(result_display["City"].unique()):
             result_display[result_display["City"] == city].to_excel(writer, sheet_name=city[:31], index=False)
     st.download_button(
-        "📥 Unduh Hasil Analisis ABC (Excel)",
+        "📥 Unduh Hasil Analisis ABC V3 (Excel)",
         data=output.getvalue(),
-        file_name=f"Hasil_Analisis_ABC_{end_date_input}.xlsx",
+        file_name=f"Hasil_Analisis_ABC_V3_{end_date_input}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
-# ── Tab Dashboard ──────────────────────────────────────────────────────────────
+# ── Tab Dashboard — identik V2 ─────────────────────────────────────────────────
 def _render_dashboard_tab():
-    if st.session_state.abc_analysis_result is None:
+    if st.session_state.get("abc_v3_result") is None:
         st.info("Tidak ada data untuk ditampilkan. Jalankan analisis terlebih dahulu.")
         return
 
-    result = st.session_state.abc_analysis_result.copy()
+    result = st.session_state.abc_v3_result.copy()
     metode = st.selectbox("Pilih Metode ABC untuk Dashboard:", ("Log-Benchmark - WMA", "Log-Benchmark - Mean"))
 
     if metode == "Log-Benchmark - WMA":
@@ -391,7 +385,6 @@ def _render_dashboard_tab():
     total_sum = summary["sum"].sum()
     summary["avg_unit"] = np.where(summary["count"] > 0, summary["sum"] / summary["count"], 0)
 
-    # Metric cards
     st.markdown("---")
     cols = st.columns(len(LABELS))
     for i, label in enumerate(LABELS):
