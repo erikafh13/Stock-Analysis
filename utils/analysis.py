@@ -174,6 +174,159 @@ def _apply_category_log(row, metric_col: str, ratio_col: str) -> str:
     return "E"
 
 
+# ==============================================================================
+# KLASIFIKASI STOK vs SO — Metode Statistik (Kuartil / Tukey)
+# ==============================================================================
+STOK_SO_MIN_GROUP_SIZE = 5   # minimal SKU per grup agar tidak fallback
+
+STOK_SO_METHOD_DESCRIPTION = """
+**Metode: Statistik (Kuartil / Tukey)**
+
+Setiap baris (SKU × Cabang) melewati alur berikut:
+
+1. **Tentukan Zona**, berdasarkan `Status Stock` yang sudah ada:
+   - Status **Balance** → langsung Kategori **A**
+   - Stock = 0 **dan** SO WMA = 0 → **Tidak Aktif** (tidak ada aktivitas sama sekali)
+   - Stock > 0, SO WMA = 0, Overstock → **F** (overstock ekstrem / dead stock)
+   - Stock = 0, SO WMA > 0, Understock → **F** (understock ekstrem / stockout total)
+   - Sisanya (Stock > 0 **dan** SO WMA > 0, Overstock/Understock) → masuk **pool PROSES**
+
+2. **Hitung Rasio & Severity** untuk pool PROSES:
+   - `Rasio Stok/SO = (Stock Cabang / SO WMA) × 100%`
+   - `Severity = Rasio` bila arah **OVER**, atau `-Rasio` bila arah **UNDER**
+     (supaya di kedua arah, semakin tinggi Severity = semakin parah kondisinya)
+
+3. **Kelompokkan** pool PROSES per **Cabang + Kategori Barang + Arah**.
+   Kalau anggota grup < 5 SKU, fallback ke **Kategori Barang + Arah** (lintas
+   cabang). Kalau masih < 5, fallback terakhir ke **Arah** saja (pool global).
+   Ini menjaga agar Q1/Q2/Q3 dihitung dari grup yang cukup besar secara
+   statistik, bukan dari segelintir SKU yang tidak representatif.
+
+4. **Hitung Q1/Q2/Q3** dari Severity di masing-masing grup, lalu petakan:
+   - `Severity ≤ Q1` → **B** (25% paling ringan di grupnya)
+   - `Severity ≤ Q2` → **C**
+   - `Severity ≤ Q3` → **D**
+   - `Severity > Q3` → **E** (25% paling parah di grupnya)
+
+   Catatan: karena Q1/Q2/Q3 dihitung ulang per grup, batas "B ke C" untuk
+   satu Kategori+Cabang bisa berbeda angka dengan Kategori+Cabang lain —
+   tapi maknanya tetap konsisten (B = paling ringan, E = paling parah
+   *relatif terhadap grupnya sendiri*).
+
+**Kolom yang dihasilkan:** `Rasio Stok/SO` (angka, %) dan `Kategori Stok`
+(A / Tidak Aktif / F / B / C / D / E).
+"""
+
+
+def classify_stock_vs_so_statistik(
+    df: pd.DataFrame,
+    city_col: str = "City",
+    kategori_col: str = "Kategori Barang",
+    status_col: str = "Status Stock",
+    stock_col: str = "Stock Cabang",
+    so_col: str = "SO WMA",
+    min_group_size: int = STOK_SO_MIN_GROUP_SIZE,
+) -> pd.DataFrame:
+    """
+    Klasifikasi Stok vs SO memakai metode Statistik (Kuartil / Tukey).
+    Lihat STOK_SO_METHOD_DESCRIPTION untuk penjelasan lengkap alurnya.
+
+    Menambahkan 2 kolom ke DataFrame:
+        "Rasio Stok/SO" : (Stock Cabang / SO WMA) x 100, dibulatkan 2 desimal
+                          (NaN untuk baris yang bukan pool PROSES)
+        "Kategori Stok" : A / Tidak Aktif / F / B / C / D / E
+    """
+    df = df.copy()
+    status = df[status_col].astype(str).str.lower()
+    stock  = df[stock_col].fillna(0)
+    so     = df[so_col].fillna(0)
+
+    is_balance    = status.str.contains("balance")
+    is_overstock  = status.str.contains("overstock")
+    is_understock = status.str.contains("understock")
+
+    is_tidak_aktif = (stock == 0) & (so == 0)
+    is_f_over      = (stock > 0)  & (so == 0) & is_overstock  & ~is_tidak_aktif
+    is_f_under     = (stock == 0) & (so > 0)  & is_understock & ~is_tidak_aktif
+    is_proses      = (stock > 0)  & (so > 0)  & (is_overstock | is_understock)
+
+    zona = np.select(
+        [is_balance, is_tidak_aktif, is_f_over, is_f_under, is_proses],
+        ["BALANCE",  "TIDAK_AKTIF", "F_EXTREME", "F_EXTREME", "PROSES"],
+        default="-",
+    )
+    arah = np.where(
+        is_proses & is_overstock, "OVER",
+        np.where(is_proses & is_understock, "UNDER", ""),
+    )
+
+    rasio = pd.Series(np.nan, index=df.index)
+    rasio.loc[is_proses] = stock.loc[is_proses] / so.loc[is_proses] * 100
+
+    severity = pd.Series(np.nan, index=df.index)
+    mask_over  = (arah == "OVER")
+    mask_under = (arah == "UNDER")
+    severity.loc[mask_over]  =  rasio.loc[mask_over]
+    severity.loc[mask_under] = -rasio.loc[mask_under]
+
+    kategori_final = pd.Series("-", index=df.index, dtype=object)
+    kategori_final.loc[zona == "BALANCE"]     = "A"
+    kategori_final.loc[zona == "TIDAK_AKTIF"] = "Tidak Aktif"
+    kategori_final.loc[zona == "F_EXTREME"]   = "F"
+
+    # ── Klasifikasi B/C/D/E untuk pool PROSES (kuartil + fallback bertingkat) ─
+    proses_idx = df.index[zona == "PROSES"]
+    helper = pd.DataFrame({
+        city_col:     df.loc[proses_idx, city_col],
+        kategori_col: df.loc[proses_idx, kategori_col],
+        "_Arah":      pd.Series(arah, index=df.index).loc[proses_idx],
+        "_Severity":  severity.loc[proses_idx],
+    })
+    remaining = helper.copy()
+
+    def _label(sev, q1, q2, q3):
+        if sev <= q1: return "B"
+        if sev <= q2: return "C"
+        if sev <= q3: return "D"
+        return "E"
+
+    levels = [
+        [city_col, kategori_col, "_Arah"],
+        [kategori_col, "_Arah"],
+        ["_Arah"],
+    ]
+    for lvl in levels:
+        if remaining.empty:
+            break
+        is_global = (lvl == ["_Arah"])
+        for _, g in remaining.groupby(lvl, dropna=False):
+            if len(g) >= min_group_size or is_global:
+                q1, q2, q3 = g["_Severity"].quantile([0.25, 0.5, 0.75]).values
+                kategori_final.loc[g.index] = g["_Severity"].apply(
+                    lambda s: _label(s, q1, q2, q3)
+                ).values
+                remaining = remaining.drop(g.index)
+
+    df["Rasio Stok/SO"] = rasio.round(2)
+    df["Kategori Stok"] = kategori_final
+    return df
+
+
+def highlight_kategori_stok(val: str) -> str:
+    warna = {
+        "A":           "#d4edda",  # hijau — balance
+        "B":           "#cce5ff",  # biru — paling ringan dalam pool
+        "C":           "#fff3cd",  # kuning
+        "D":           "#ffe5b4",  # oranye
+        "E":           "#f8d7da",  # merah muda — paling parah
+        "F":           "#dc3545",  # merah tua — ekstrem (dead stock / stockout total)
+        "Tidak Aktif": "#e9ecef",  # abu-abu — tidak ada aktivitas
+    }
+    color = warna.get(val, "")
+    text  = "white" if val == "F" else "black"
+    return f"background-color: {color}; color: {text}"
+
+
 # ── Min & Max Stock (Vectorized) ───────────────────────────────────────────────
 def calculate_min_stock(df: pd.DataFrame, kategori_col: str, so_col: str) -> pd.Series:
     """
