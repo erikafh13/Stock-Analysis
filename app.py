@@ -25,6 +25,7 @@ page = st.sidebar.radio(
         "Input Data",
         "Hasil Analisa Stock",
         "Hasil Analisa Stock V2",
+        "Hasil Analisa Stock V3",
         "Analisis Donor Stock",
         "Analisis Produk Baru",
         "Analisis ABC V3 (Platform)",
@@ -50,6 +51,10 @@ _defaults = {
     "stock_v2_result":       None,
     "stock_v2_bulan_cols":   [],
     "stock_v2_pivot_df":     pd.DataFrame(),
+    # V3
+    "stock_v3_result":       None,
+    "stock_v3_bulan_cols":   [],
+    "stock_v3_pivot_df":     pd.DataFrame(),
     # Produk Baru
     "items_df":              pd.DataFrame(),
     "new_product_result":    None,
@@ -79,6 +84,10 @@ elif page == "Hasil Analisa Stock":
 
 elif page == "Hasil Analisa Stock V2":
     from pages.stock_analysis_v2 import render
+    render()
+
+elif page == "Hasil Analisa Stock V3":
+    from pages.stock_analysis_v3 import render
     render()
 
 elif page == "Analisis Donor Stock":
