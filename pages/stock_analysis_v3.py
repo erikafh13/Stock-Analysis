@@ -401,8 +401,9 @@ def _render_per_kota(result, bulan_cols, sel_abc, sel_status, KAT_COL):
                 + ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
                 + ["SO WMA", "SO Mean", "SO Total"]
                 + ["Log (10) WMA", "Avg Log WMA", "Ratio Log WMA", KAT_COL]
-                + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock", "Add Stock", "Suggested PO"]
+                + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock"]
                 + ["Rasio Stok/SO", "Kategori Stok"]
+                + ["Add Stock", "Suggested PO"]
             )
             display_cols = KEYS + [c for c in metric_order if c in city_df.columns]
             city_df      = city_df[display_cols]
@@ -439,8 +440,9 @@ def _render_pivot_v3(result, bulan_cols, KAT_COL):
             + ["Penjualan Bln 1", "Penjualan Bln 2", "Penjualan Bln 3"]
             + ["SO WMA", "SO Total"]
             + [KAT_COL]
-            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock", "Add Stock", "Suggested PO", "Sisa Stock Surabaya"]
+            + ["Min Stock", "Max Stock", "Stock Cabang", "Persentase Stock", "Status Stock"]
             + ["Rasio Stok/SO", "Kategori Stok"]
+            + ["Add Stock", "Suggested PO", "Sisa Stock Surabaya"]
         )
         pivot_existing = [c for c in pivot_cols if c in result.columns]
         pivot = result.pivot_table(index=KEYS, columns="City", values=pivot_existing, aggfunc="first")
