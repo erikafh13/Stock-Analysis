@@ -20,7 +20,9 @@ DEFAULT_DISTANCE_PRIORITY = {
     "JOGJA":    ["SURABAYA", "SEMARANG", "MALANG", "BALI", "JAKARTA"],
     "MALANG":   ["SURABAYA", "JOGJA", "SEMARANG", "BALI", "JAKARTA"],
     "BALI":     ["SURABAYA", "MALANG", "JOGJA", "SEMARANG", "JAKARTA"],
-    "SURABAYA": [],
+    # BARU: Surabaya sekarang juga bisa jadi penerima, jadi butuh urutan
+    # prioritas donor untuknya juga (bisa diubah lagi lewat UI "Prioritas Jarak").
+    "SURABAYA": ["SEMARANG", "JOGJA", "MALANG", "BALI", "JAKARTA"],
 }
 
 _SKENARIO_COLOR = {
@@ -58,6 +60,9 @@ def _run_donor_calc(df, rules, distance):
         sby_rows      = group[mask_sby]
         stock_sby     = float(sby_rows["Stock Cabang"].sum())
         min_stock_sby = float(sby_rows["Min Stock"].sum())
+        # Surabaya boleh mendonor kalau stoknya masih di atas Min Stock sendiri
+        # (aturan ini tetap dipakai apa adanya — SBY sebagai hub lebih longgar
+        # dibanding cabang lain yang baru dianggap donor kalau sudah Overstock).
         sisa_sby      = max(0.0, stock_sby - min_stock_sby)
 
         cab_rows = group[~mask_sby].copy()
@@ -69,10 +74,24 @@ def _run_donor_calc(df, rules, distance):
         donors["_avail"] = (donors["Stock Cabang"] - donors["Max Stock"]).clip(lower=0).astype(float)
         donors = donors[donors["_avail"] > 0]
 
-        receivers = cab_rows[
-            (cab_rows["Status Stock"] == "Understock") &
-            (cab_rows[KAT_COL] != "F")
-        ].copy().sort_values("Persentase Stock", ascending=True)
+        # BARU: Surabaya juga bisa masuk daftar penerima kalau statusnya Understock.
+        # Tidak akan bentrok dengan status donor di atas, karena kalau Understock
+        # maka sisa_sby otomatis 0 (SBY tidak sedang surplus).
+        sby_receivers = sby_rows[
+            (sby_rows["Status Stock"] == "Understock") &
+            (sby_rows[KAT_COL] != "F")
+        ].copy()
+
+        receivers = pd.concat(
+            [
+                cab_rows[
+                    (cab_rows["Status Stock"] == "Understock") &
+                    (cab_rows[KAT_COL] != "F")
+                ],
+                sby_receivers,
+            ],
+            ignore_index=True,
+        ).sort_values("Persentase Stock", ascending=True)
 
         total_need = float(receivers["Add Stock"].sum())
         donor_pool = float(donors["_avail"].sum())
@@ -190,10 +209,17 @@ Cabang dengan status **Overstock** → stoknya melebihi Max Stock.
 `Qty bisa didonorkan = Stock Cabang − Max Stock`
 *Contoh: Jogja stock 75, Max 46 → bisa kirim 29 unit*
 
+Surabaya adalah pengecualian: Surabaya boleh mendonor kalau stoknya masih **di
+atas Min Stock miliknya sendiri** (tidak harus sampai Overstock dulu), karena
+posisinya sebagai hub pusat.
+
 **② Siapa yang KEKURANGAN (Penerima)?**
 Cabang dengan status **Understock** → stoknya di bawah Min Stock.
 `Kebutuhan (Add Stock) = Min Stock − Stock Cabang`
 *Contoh: Jakarta stock 6, Min 47 → butuh 41 unit*
+
+Surabaya juga bisa menjadi penerima kalau statusnya Understock — akan
+dicarikan donor dari cabang lain sesuai prioritas jarak dan aturan yang berlaku.
 
 **③ Berapa yang tersedia untuk dibagikan (Pool)?**
 - Sisa Surabaya = `max(0, Stock SBY − Min Stock SBY)` → SBY hanya boleh kirim kalau stoknya masih di atas minimum sendiri
@@ -201,7 +227,7 @@ Cabang dengan status **Understock** → stoknya di bawah Min Stock.
 - **Total Pool = Sisa SBY + semua donor cabang**
 
 **④ Cara pembagian:**
-- Penerima yang paling kritis (% stock terkecil) **mendapat prioritas pertama**
+- Penerima yang paling kritis (% stock terkecil) **mendapat prioritas pertama** — termasuk Surabaya jika ia sedang understock
 - Untuk tiap penerima, donor dipilih berdasarkan **urutan jarak** yang Anda atur
 - Jika ada **aturan larangan**, donor tersebut dilewati
 - Jika pool habis sebelum semua terpenuhi → sisanya masuk ke kolom **Sisa PO Supplier**
@@ -258,7 +284,9 @@ Cabang dengan status **Understock** → stoknya di bawah Min Stock.
 
         with cfg2:
             st.caption("Atur urutan prioritas donor per penerima. **Urutan 1 = paling dekat/prioritas utama.**")
-            cities_recv = [c for c in ALL_CITIES if c != "SURABAYA"]
+            # BARU: Surabaya ikut dimasukkan, karena sekarang Surabaya juga bisa
+            # menjadi penerima dan butuh urutan prioritas donor untuknya.
+            cities_recv = list(ALL_CITIES)
             cols_dist = st.columns(len(cities_recv))
             for i, rcity in enumerate(cities_recv):
                 with cols_dist[i]:
@@ -510,7 +538,6 @@ Cabang dengan status **Understock** → stoknya di bawah Min Stock.
         st.subheader("📍 Prioritas Jarak Aktif Saat Ini")
         dist_rows = []
         for rcity in ALL_CITIES:
-            if rcity == "SURABAYA": continue
             order = distance.get(rcity, [])
             for rank, dcity in enumerate(order):
                 dist_rows.append({"Penerima": rcity, "Prioritas": rank+1, "Donor": dcity})
