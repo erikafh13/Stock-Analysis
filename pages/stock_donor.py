@@ -1,582 +1,696 @@
 """
-pages/stock_donor.py  —  Analisis Donor Stock (V3 Lateral Transfer)
+DB — database pusat (MySQL via XAMPP) untuk SEMUA data scraping
+====================================================================
+Ganti penyimpanan file (Excel/JSON/CSV) jadi MySQL. Dipakai bersama oleh
+scraping_new.py, scrape_varian.py, kirim_ke_portal.py, bersihkan_data_lama.py.
+
+SETUP YANG DIBUTUHKAN:
+  1. Jalankan XAMPP, nyalakan modul MySQL (klik "Start" di XAMPP Control Panel).
+  2. Buka http://localhost/phpmyadmin -- pastikan bisa diakses (server jalan).
+  3. TIDAK PERLU bikin database manual -- script ini otomatis membuatnya
+     ('shopee_scraper') beserta semua tabel, kalau belum ada.
+  4. Isi .env (opsional, kalau beda dari default XAMPP):
+       DB_HOST=127.0.0.1
+       DB_PORT=3306
+       DB_USER=root
+       DB_PASS=
+       DB_NAME=shopee_scraper
+     Default XAMPP: user root, password KOSONG -- kalau kamu belum ubah
+     password root XAMPP, biarkan .env kosong/tidak usah diisi, otomatis
+     pakai default ini.
+
+TABEL:
+  produk          - hasil scraping toko (pengganti Excel Tersedia/Habis)
+  progress        - checkpoint per toko per run (pengganti file JSON progress/)
+  varian          - hasil scraping varian (pengganti Excel output_varian/)
+  varian_memori   - kata & skornya untuk belajar deteksi varian (pengganti
+                    varian_memory.json)
+  varian_produk_dipelajari - histori produk yang sudah dipelajari (biar tidak
+                    dihitung dobel kalau di-scrape ulang)
+  captcha_log     - catatan tiap captcha (pengganti captcha_log.csv)
 """
 
-import numpy as np
-import pandas as pd
-import streamlit as st
-from io import BytesIO
+import os
+import re
+import sys
+from datetime import datetime, timedelta
 
-from utils.analysis import (
-    highlight_status_stock,
-    highlight_kategori_abc_log,
-)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-ALL_CITIES = ["SURABAYA", "JAKARTA", "SEMARANG", "JOGJA", "MALANG", "BALI"]
+try:
+    import mysql.connector
+    from mysql.connector import pooling
+except ImportError:
+    print("[X] mysql-connector-python belum terpasang. Jalankan:")
+    print("    pip install mysql-connector-python")
+    sys.exit(1)
 
-DEFAULT_DISTANCE_PRIORITY = {
-    "JAKARTA":  ["SURABAYA", "SEMARANG", "JOGJA", "MALANG", "BALI"],
-    "SEMARANG": ["SURABAYA", "JOGJA", "MALANG", "JAKARTA", "BALI"],
-    "JOGJA":    ["SURABAYA", "SEMARANG", "MALANG", "BALI", "JAKARTA"],
-    "MALANG":   ["SURABAYA", "JOGJA", "SEMARANG", "BALI", "JAKARTA"],
-    "BALI":     ["SURABAYA", "MALANG", "JOGJA", "SEMARANG", "JAKARTA"],
-    # BARU: Surabaya sekarang juga bisa jadi penerima, jadi butuh urutan
-    # prioritas donor untuknya juga (bisa diubah lagi lewat UI "Prioritas Jarak").
-    "SURABAYA": ["SEMARANG", "JOGJA", "MALANG", "BALI", "JAKARTA"],
+DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
+DB_PORT = int(os.environ.get("DB_PORT", "3306"))
+DB_USER = os.environ.get("DB_USER", "root")
+DB_PASS = os.environ.get("DB_PASS", "")
+DB_NAME = os.environ.get("DB_NAME", "shopee_scraper")
+
+# ── SSL -- WAJIB untuk database cloud (Aiven, PlanetScale, dll) yang
+# menolak koneksi tanpa enkripsi. Untuk XAMPP lokal biasanya TIDAK perlu
+# (biarkan kosong di .env). Isi DB_SSL_CA dengan path file CA certificate
+# yang didownload dari dashboard provider cloud-mu (mis. ca.pem dari Aiven). ──
+DB_SSL_CA = os.environ.get("DB_SSL_CA", "").strip() or None
+
+_pool = None
+
+
+def _param_koneksi(**tambahan):
+    """Kumpulkan parameter koneksi dasar (host/port/user/pass + SSL kalau
+    diisi), supaya tidak ditulis berulang di tiap fungsi yang connect."""
+    params = dict(
+        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
+        connection_timeout=10,
+    )
+    if DB_SSL_CA:
+        # HANYA ssl_ca -- JANGAN tambahkan ssl_verify_cert=True.
+        # Kombinasi keduanya di beberapa versi mysql-connector-python
+        # (termasuk yang dipakai di sini) memicu error
+        # "SSL_CTX_set_default_verify_paths failed" -- connector mencoba
+        # cari sertifikat SISTEM DEFAULT (bukan yang kita kasih), gagal,
+        # padahal ssl_ca sendirian SUDAH CUKUP untuk verifikasi terhadap
+        # sertifikat spesifik yang kita berikan (mis. ca.pem dari Aiven).
+        params["ssl_ca"] = DB_SSL_CA
+    params.update(tambahan)
+    return params
+
+
+def _koneksi_tanpa_db():
+    """Koneksi ke server MySQL TANPA pilih database -- dipakai sekali di awal
+    untuk membuat database kalau belum ada."""
+    return mysql.connector.connect(**_param_koneksi())
+
+
+def pastikan_database_ada():
+    """Buat database DB_NAME kalau belum ada. Dipanggil sekali di awal
+    (init_db()) sebelum connection pool dibuat."""
+    conn = _koneksi_tanpa_db()
+    cur = conn.cursor()
+    cur.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` "
+               f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+SKEMA_TABEL = {
+    "produk": """
+        CREATE TABLE IF NOT EXISTS produk (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            toko VARCHAR(255) NOT NULL,
+            nama_produk TEXT NOT NULL,
+            harga VARCHAR(100),
+            penjualan_bulan INT DEFAULT 0,
+            pendapatan_bulan BIGINT DEFAULT 0,
+            penjualan_minggu INT DEFAULT 0,
+            pendapatan_minggu BIGINT DEFAULT 0,
+            rating VARCHAR(20),
+            url_produk TEXT,
+            status ENUM('tersedia','habis') NOT NULL DEFAULT 'tersedia',
+            run_id VARCHAR(20) NOT NULL,
+            tanggal DATE NOT NULL,
+            dibuat_pada DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_toko_tanggal (toko, tanggal),
+            INDEX idx_run_id (run_id)
+        ) ENGINE=InnoDB
+    """,
+    "progress": """
+        CREATE TABLE IF NOT EXISTS progress (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            run_id VARCHAR(20) NOT NULL,
+            toko VARCHAR(255) NOT NULL,
+            status VARCHAR(50) NOT NULL,
+            halaman_terakhir INT DEFAULT 0,
+            jumlah_produk INT DEFAULT 0,
+            diperbarui_pada DATETIME DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_run_toko (run_id, toko)
+        ) ENGINE=InnoDB
+    """,
+    "varian": """
+        CREATE TABLE IF NOT EXISTS varian (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            toko VARCHAR(255),
+            nama_produk TEXT NOT NULL,
+            grup_varian VARCHAR(255),
+            varian VARCHAR(255),
+            harga VARCHAR(100),
+            tipe VARCHAR(50),
+            url_produk TEXT,
+            tanggal DATE NOT NULL,
+            dibuat_pada DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_toko_tanggal (toko, tanggal)
+        ) ENGINE=InnoDB
+    """,
+    "varian_memori": """
+        CREATE TABLE IF NOT EXISTS varian_memori (
+            kata VARCHAR(100) PRIMARY KEY,
+            jumlah_varian INT DEFAULT 0,
+            jumlah_single INT DEFAULT 0,
+            diperbarui_pada DATETIME DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB
+    """,
+    "varian_produk_dipelajari": """
+        CREATE TABLE IF NOT EXISTS varian_produk_dipelajari (
+            url_produk VARCHAR(768) PRIMARY KEY,
+            nama_produk TEXT,
+            punya_varian BOOLEAN NOT NULL,
+            ada_harga_beda BOOLEAN NOT NULL DEFAULT FALSE,
+            dipelajari_pada DATETIME DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB
+    """,
+    "captcha_log": """
+        CREATE TABLE IF NOT EXISTS captcha_log (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            toko VARCHAR(255),
+            akun VARCHAR(100),
+            jenis VARCHAR(50),
+            url TEXT,
+            waktu DATETIME DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB
+    """,
+    "pengguna": """
+        CREATE TABLE IF NOT EXISTS pengguna (
+            orang_ke INT PRIMARY KEY,
+            nama VARCHAR(100) NOT NULL,
+            nomor_wa VARCHAR(20),
+            diperbarui_pada DATETIME DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB
+    """,
 }
 
-_SKENARIO_COLOR = {
-    "0 - TIDAK ADA KEBUTUHAN":      "#d4edda",
-    "2 - SBY CUKUP":                "#cce5ff",
-    "3 - SBY TERBATAS + ADA DONOR": "#fff3cd",
-    "4 - HANYA DONOR CABANG":       "#ffe5b4",
-    "5 - POOL TIDAK CUKUP":         "#f8d7da",
-    "1 - KURANG (TIDAK ADA POOL)":  "#f5c6cb",
-}
 
-def _hl_ske(val):   return f"background-color: {_SKENARIO_COLOR.get(str(val), '')}"
-def _hl_donor(val): return "background-color: #d4edda; font-weight: bold" if val and val != "-" else ""
-def _hl_recv(val):  return "background-color: #cce5ff; font-weight: bold" if val and val != "-" else ""
+def init_db():
+    """Panggil SEKALI di awal tiap script (scraping_new.py, scrape_varian.py,
+    dll) sebelum operasi database lain. Bikin database & semua tabel kalau
+    belum ada -- jadi setup-nya 'sekali colok langsung jalan', tidak perlu
+    bikin tabel manual di phpMyAdmin."""
+    global _pool
+    try:
+        pastikan_database_ada()
+    except mysql.connector.Error as e:
+        print(f"[X] Gagal konek ke MySQL ({DB_HOST}:{DB_PORT}): {e}")
+        print("    Kalau pakai XAMPP lokal: pastikan sudah di-Start.")
+        print("    Kalau pakai database cloud (mis. Aiven): cek DB_SSL_CA")
+        print("    di .env sudah menunjuk ke file CA certificate yang benar.")
+        raise
 
-def _default_rules():
-    r = {}
-    for d in ALL_CITIES:
-        r[d] = {}
-        for p in ALL_CITIES:
-            r[d][p] = False if d == p else True
-    return r
+    conn = mysql.connector.connect(**_param_koneksi(database=DB_NAME))
+    cur = conn.cursor()
+    for nama_tabel, ddl in SKEMA_TABEL.items():
+        cur.execute(ddl)
+
+    # ── MIGRASI: tambah kolom baru ke tabel yang SUDAH ADA sebelumnya ──
+    # CREATE TABLE IF NOT EXISTS tidak menambah kolom ke tabel lama yang
+    # sudah terlanjur dibuat (mis. database Aiven yang sudah jalan lama).
+    # Cek dulu apakah kolom sudah ada, kalau belum baru ALTER TABLE.
+    def _pastikan_kolom(tabel, kolom, definisi):
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema=%s AND table_name=%s AND column_name=%s",
+            (DB_NAME, tabel, kolom)
+        )
+        if cur.fetchone()[0] == 0:
+            cur.execute(f"ALTER TABLE {tabel} ADD COLUMN {kolom} {definisi}")
+            print(f"[*] Migrasi: kolom '{kolom}' ditambahkan ke tabel '{tabel}'.")
+
+    _pastikan_kolom("varian_produk_dipelajari", "ada_harga_beda",
+                    "BOOLEAN NOT NULL DEFAULT FALSE")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    _pool = pooling.MySQLConnectionPool(
+        pool_name="shopee_pool", pool_size=5,
+        **_param_koneksi(database=DB_NAME)
+    )
+    print(f"[*] Database '{DB_NAME}' siap ({len(SKEMA_TABEL)} tabel)."
+          + (" [SSL aktif]" if DB_SSL_CA else ""))
 
 
-# ── Kalkulasi inti ─────────────────────────────────────────────────────────────
-def _run_donor_calc(df, rules, distance):
-    KAT_COL = "Kategori ABC (Log-Benchmark - WMA)"
-    KEYS    = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
-    all_rows = []
+def get_conn():
+    """Ambil koneksi dari pool. Panggil init_db() dulu sebelum ini."""
+    if _pool is None:
+        init_db()
+    return _pool.get_connection()
 
-    for sku, group in df.groupby("No. Barang"):
-        group = group.copy().reset_index(drop=True)
-        mask_sby = group["City"] == "SURABAYA"
 
-        sby_rows      = group[mask_sby]
-        stock_sby     = float(sby_rows["Stock Cabang"].sum())
-        min_stock_sby = float(sby_rows["Min Stock"].sum())
-        # Surabaya boleh mendonor kalau stoknya masih di atas Min Stock sendiri
-        # (aturan ini tetap dipakai apa adanya — SBY sebagai hub lebih longgar
-        # dibanding cabang lain yang baru dianggap donor kalau sudah Overstock).
-        sisa_sby      = max(0.0, stock_sby - min_stock_sby)
+# ══════════════════════════════════════════════════════
+# PRODUK TOKO — pengganti Excel Tersedia/Habis
+# ══════════════════════════════════════════════════════
 
-        cab_rows = group[~mask_sby].copy()
+def _bersihkan_angka(nilai):
+    """Ubah nilai angka yang mungkin masih berformat TAMPILAN ('Rp85.410.200',
+    '1.234', 'Rp 500rb', dll) jadi integer murni untuk disimpan ke database.
 
-        donors = cab_rows[
-            (cab_rows["Status Stock"] == "Overstock") &
-            (cab_rows[KAT_COL] != "F")
-        ].copy()
-        donors["_avail"] = (donors["Stock Cabang"] - donors["Max Stock"]).clip(lower=0).astype(float)
-        donors = donors[donors["_avail"] > 0]
+    KENAPA PERLU: kolom penjualan_bulan/pendapatan_bulan/dst di database
+    bertipe INT/BIGINT, tapi data dari scraping_new.py sering masih dalam
+    format TAMPILAN Excel (ada 'Rp', titik pemisah ribuan) -- MySQL menolak
+    string seperti itu dengan error 'Incorrect integer value'.
 
-        # BARU: Surabaya juga bisa masuk daftar penerima kalau statusnya Understock.
-        # Tidak akan bentrok dengan status donor di atas, karena kalau Understock
-        # maka sisa_sby otomatis 0 (SBY tidak sedang surplus).
-        sby_receivers = sby_rows[
-            (sby_rows["Status Stock"] == "Understock") &
-            (sby_rows[KAT_COL] != "F")
-        ].copy()
+    Aman untuk berbagai bentuk input: sudah int (dibiarkan), string berformat
+    Rupiah, string angka polos, None/kosong (jadi 0), atau sampah yang sama
+    sekali tidak bisa dibaca (jadi 0, bukan bikin crash)."""
+    if nilai is None:
+        return 0
+    if isinstance(nilai, (int,)):
+        return nilai
+    if isinstance(nilai, float):
+        return int(nilai)
+    # String: buang semua karakter selain digit (buang "Rp", ".", ",", " ", dll)
+    teks = str(nilai).strip()
+    if not teks:
+        return 0
+    hanya_digit = re.sub(r"[^\d]", "", teks)
+    if not hanya_digit:
+        return 0
+    try:
+        return int(hanya_digit)
+    except ValueError:
+        return 0
 
-        receivers = pd.concat(
-            [
-                cab_rows[
-                    (cab_rows["Status Stock"] == "Understock") &
-                    (cab_rows[KAT_COL] != "F")
-                ],
-                sby_receivers,
-            ],
-            ignore_index=True,
-        ).sort_values("Persentase Stock", ascending=True)
 
-        total_need = float(receivers["Add Stock"].sum())
-        donor_pool = float(donors["_avail"].sum())
-        total_pool = sisa_sby + donor_pool
+def simpan_produk(toko, produk_list, status, run_id, tanggal=None):
+    """Simpan banyak produk sekaligus (bulk insert). produk_list = list of
+    dict dengan key: nama_produk, harga, penjualan_bulan, pendapatan_bulan,
+    penjualan_minggu, pendapatan_minggu, rating, url_produk.
 
-        if total_need == 0:
-            skenario = "0 - TIDAK ADA KEBUTUHAN"
-        elif total_pool == 0:
-            skenario = "1 - KURANG (TIDAK ADA POOL)"
-        elif sisa_sby >= total_need:
-            skenario = "2 - SBY CUKUP"
-        elif sisa_sby > 0 and len(donors) > 0:
-            skenario = "3 - SBY TERBATAS + ADA DONOR"
-        elif sisa_sby == 0 and len(donors) > 0:
-            skenario = "4 - HANYA DONOR CABANG"
+    Menghapus dulu data toko+tanggal+status yang lama (kalau run ulang di
+    hari yang sama), supaya tidak menumpuk duplikat -- perilaku setara
+    dengan Excel yang MENIMPA file lama."""
+    if not produk_list:
+        return 0
+    tanggal = tanggal or datetime.now().date()
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM produk WHERE toko=%s AND tanggal=%s AND status=%s",
+            (toko, tanggal, status)
+        )
+        rows = [
+            (toko, p.get("nama_produk") or p.get("Nama Produk"),
+             p.get("harga") or p.get("Harga"),
+             _bersihkan_angka(p.get("penjualan_bulan") or p.get("Penjualan (bln)")),
+             _bersihkan_angka(p.get("pendapatan_bulan") or p.get("Pendapatan (bln)")),
+             _bersihkan_angka(p.get("penjualan_minggu") or p.get("Penjualan (mg)")),
+             _bersihkan_angka(p.get("pendapatan_minggu") or p.get("Pendapatan (mg)")),
+             p.get("rating") or p.get("Rating"),
+             p.get("url_produk") or p.get("URL Produk"),
+             status, run_id, tanggal)
+            for p in produk_list
+        ]
+        cur.executemany(
+            """INSERT INTO produk
+               (toko, nama_produk, harga, penjualan_bulan, pendapatan_bulan,
+                penjualan_minggu, pendapatan_minggu, rating, url_produk,
+                status, run_id, tanggal)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            rows
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def ambil_produk_toko(toko, tanggal=None, status=None):
+    """Ambil produk toko tertentu (tanggal default = hari ini). Return
+    list of dict, key sesuai nama kolom."""
+    tanggal = tanggal or datetime.now().date()
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        if status:
+            cur.execute(
+                "SELECT * FROM produk WHERE toko=%s AND tanggal=%s AND status=%s",
+                (toko, tanggal, status)
+            )
         else:
-            skenario = "5 - POOL TIDAK CUKUP"
-
-        donor_avail = {"SURABAYA": sisa_sby}
-        for _, dr in donors.iterrows():
-            donor_avail[dr["City"]] = dr["_avail"]
-
-        qty_terima  = {}
-        qty_donor   = {}
-        terima_dari = {}
-        donor_ke    = {}
-
-        for _, rv in receivers.iterrows():
-            rcity = rv["City"]
-            need  = float(rv["Add Stock"])
-            prio  = distance.get(rcity, [])
-            extra = [c for c in donor_avail if c not in prio]
-            for dcity in (prio + extra):
-                if need <= 0:
-                    break
-                avail = donor_avail.get(dcity, 0.0)
-                if avail <= 0:
-                    continue
-                if not rules.get(dcity, {}).get(rcity, True):
-                    continue
-                alloc = int(np.ceil(min(need, avail)))
-                qty_terima[rcity]  = qty_terima.get(rcity, 0)  + alloc
-                qty_donor[dcity]   = qty_donor.get(dcity, 0)   + alloc
-                terima_dari.setdefault(rcity, []).append(dcity)
-                donor_ke.setdefault(dcity, []).append(rcity)
-                donor_avail[dcity] -= alloc
-                need -= alloc
-
-        first = group.iloc[0]
-        meta  = {k: first.get(k, "") for k in KEYS}
-
-        for _, row in group.iterrows():
-            city = row["City"]
-            bisa = int(max(0, row["Stock Cabang"] - row["Max Stock"])) if row["Status Stock"] == "Overstock" and row.get(KAT_COL) != "F" else 0
-            sisa_po = int(max(0, row["Add Stock"] - qty_terima.get(city, 0))) if row["Status Stock"] == "Understock" else 0
-            all_rows.append({
-                **meta,
-                "City":             city,
-                "Kategori ABC":     row.get(KAT_COL, "-"),
-                "Stock Cabang":     int(row["Stock Cabang"]),
-                "Min Stock":        int(row["Min Stock"]),
-                "Max Stock":        int(row["Max Stock"]),
-                "Add Stock":        int(row["Add Stock"]),
-                "Status Stock":     row["Status Stock"],
-                "% Stock":          round(float(row.get("Persentase Stock", 0)), 1),
-                "Qty_Bisa_Donor":   bisa,
-                "Donor_Ke":         ", ".join(donor_ke.get(city, [])) or "-",
-                "Qty_Donor":        int(qty_donor.get(city, 0)),
-                "Terima_Dari":      ", ".join(terima_dari.get(city, [])) or "-",
-                "Qty_Terima":       int(qty_terima.get(city, 0)),
-                "Sisa_PO_Supplier": sisa_po,
-                "Skenario":         skenario,
-                "Total_Pool":       int(total_pool),
-                "Total_Need":       int(total_need),
-            })
-
-    return pd.DataFrame(all_rows)
+            cur.execute(
+                "SELECT * FROM produk WHERE toko=%s AND tanggal=%s",
+                (toko, tanggal)
+            )
+        return cur.fetchall()
+    finally:
+        conn.close()
 
 
-# ── Render ─────────────────────────────────────────────────────────────────────
-def render():
-    st.title("🔄 Analisis Donor Stock")
-    st.caption("Distribusi stok lateral antar cabang — optimalkan sebelum PO ke supplier")
+def toko_yang_ada_data(tanggal=None):
+    """Daftar nama toko yang SUDAH punya data di tanggal tertentu (default
+    hari ini). Dipakai kirim_ke_portal.py untuk cek kelengkapan."""
+    tanggal = tanggal or datetime.now().date()
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT toko FROM produk WHERE tanggal=%s", (tanggal,))
+        return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
 
-    result_v2 = st.session_state.get("stock_v2_result")
-    if result_v2 is None or (isinstance(result_v2, pd.DataFrame) and result_v2.empty):
-        st.warning("⚠️ Jalankan dulu **Hasil Analisa Stock V2**, kemudian kembali ke halaman ini.")
-        st.stop()
 
-    df = result_v2.copy()
-    df = df[df["City"] != "OTHERS"]
-    KAT_COL = "Kategori ABC (Log-Benchmark - WMA)"
+# ══════════════════════════════════════════════════════
+# PROGRESS / CHECKPOINT — pengganti file JSON progress/
+# ══════════════════════════════════════════════════════
 
-    if "Persentase Stock" not in df.columns:
-        df["Persentase Stock"] = np.where(
-            df["Min Stock"] > 0,
-            (df["Stock Cabang"] / df["Min Stock"]) * 100,
-            np.where(df["Stock Cabang"] > 0, 10000, 0)
-        ).round(1)
+def simpan_progress(run_id, toko, status, halaman_terakhir=0, jumlah_produk=0):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO progress (run_id, toko, status, halaman_terakhir, jumlah_produk)
+               VALUES (%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE status=%s, halaman_terakhir=%s, jumlah_produk=%s""",
+            (run_id, toko, status, halaman_terakhir, jumlah_produk,
+             status, halaman_terakhir, jumlah_produk)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-    # ── Penjelasan ─────────────────────────────────────────────────────────────
-    with st.expander("📖 Cara Kerja & Arti Setiap Kolom (klik untuk membaca)", expanded=False):
-        st.markdown("""
-### Apa yang dihitung di sini?
 
-Halaman ini menjawab: **"Sebelum order ke supplier, adakah cabang yang kelebihan stok
-dan bisa kirim ke cabang yang kekurangan?"**
+def ambil_progress(run_id, toko):
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM progress WHERE run_id=%s AND toko=%s", (run_id, toko))
+        return cur.fetchone()
+    finally:
+        conn.close()
 
----
 
-### Langkah Perhitungan (per SKU):
+# ══════════════════════════════════════════════════════
+# VARIAN — pengganti Excel output_varian/
+# ══════════════════════════════════════════════════════
 
-**① Siapa yang KELEBIHAN (Donor)?**
-Cabang dengan status **Overstock** → stoknya melebihi Max Stock.
-`Qty bisa didonorkan = Stock Cabang − Max Stock`
-*Contoh: Jogja stock 75, Max 46 → bisa kirim 29 unit*
+def simpan_varian(toko, baris_varian, tanggal=None):
+    """baris_varian = list of dict dengan key: Nama Produk, Grup Varian,
+    Varian, Harga, Tipe, URL (format yang sudah dipakai scrape_varian.py)."""
+    if not baris_varian:
+        return 0
+    tanggal = tanggal or datetime.now().date()
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM varian WHERE toko=%s AND tanggal=%s", (toko, tanggal))
+        rows = [
+            (toko, b.get("Nama Produk"), b.get("Grup Varian"), b.get("Varian"),
+             b.get("Harga"), b.get("Tipe"), b.get("URL"), tanggal)
+            for b in baris_varian
+        ]
+        cur.executemany(
+            """INSERT INTO varian
+               (toko, nama_produk, grup_varian, varian, harga, tipe, url_produk, tanggal)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            rows
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
-Surabaya adalah pengecualian: Surabaya boleh mendonor kalau stoknya masih **di
-atas Min Stock miliknya sendiri** (tidak harus sampai Overstock dulu), karena
-posisinya sebagai hub pusat.
 
-**② Siapa yang KEKURANGAN (Penerima)?**
-Cabang dengan status **Understock** → stoknya di bawah Min Stock.
-`Kebutuhan (Add Stock) = Min Stock − Stock Cabang`
-*Contoh: Jakarta stock 6, Min 47 → butuh 41 unit*
+# ══════════════════════════════════════════════════════
+# MEMORI BELAJAR VARIAN — pengganti varian_memory.json
+# ══════════════════════════════════════════════════════
 
-Surabaya juga bisa menjadi penerima kalau statusnya Understock — akan
-dicarikan donor dari cabang lain sesuai prioritas jarak dan aturan yang berlaku.
+def catat_hasil_belajar(url, nama, punya_varian, ada_harga_beda=False):
+    """Catat FAKTA (dari buka card) ke database, update skor kata-katanya.
+    Setara dengan catat_hasil() versi file JSON, tapi ke MySQL.
 
-**③ Berapa yang tersedia untuk dibagikan (Pool)?**
-- Sisa Surabaya = `max(0, Stock SBY − Min Stock SBY)` → SBY hanya boleh kirim kalau stoknya masih di atas minimum sendiri
-- Donor cabang = total kelebihan semua cabang overstock
-- **Total Pool = Sisa SBY + semua donor cabang**
+    ada_harga_beda: True kalau produk ini punya varian yang HARGANYA
+    BERBEDA (storage/RAM/tipe -- yang benar-benar diklik & dicatat harga
+    presisinya). False kalau produk single ATAU varian yang ada cuma
+    warna/packing/harga-sama (tidak ada nilai baru didapat dari buka
+    ulang). Dipakai boleh_skip_produk() supaya run berikutnya TIDAK buka
+    ulang produk yang sudah pasti tidak akan menghasilkan info baru."""
+    import re as _re
 
-**④ Cara pembagian:**
-- Penerima yang paling kritis (% stock terkecil) **mendapat prioritas pertama** — termasuk Surabaya jika ia sedang understock
-- Untuk tiap penerima, donor dipilih berdasarkan **urutan jarak** yang Anda atur
-- Jika ada **aturan larangan**, donor tersebut dilewati
-- Jika pool habis sebelum semua terpenuhi → sisanya masuk ke kolom **Sisa PO Supplier**
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
 
----
+        # Cek apakah produk ini sudah pernah dipelajari (hindari hitung dobel)
+        cur.execute("SELECT punya_varian FROM varian_produk_dipelajari WHERE url_produk=%s",
+                    (url[:768],))
+        row = cur.fetchone()
+        sudah = row is not None
+        sebelum = bool(row[0]) if row else None
 
-### Arti Setiap Kolom:
-
-| Kolom | Artinya |
-|---|---|
-| **Stock Cabang** | Stok fisik saat ini |
-| **Min Stock** | Batas bawah aman berdasarkan penjualan × buffer ABC |
-| **Max Stock** | Batas atas ideal |
-| **Add Stock** | Unit yang dibutuhkan agar mencapai Min Stock |
-| **% Stock** | `(Stock ÷ Min Stock) × 100` — makin kecil makin kritis |
-| **Qty_Bisa_Donor** | Unit kelebihan yang bisa didonorkan `(Stock − Max)` |
-| **Donor_Ke** | Cabang mana yang menerima kiriman dari cabang ini 🟢 |
-| **Qty_Donor** | Total unit yang dikirim dari cabang ini |
-| **Terima_Dari** | Dari cabang mana stok ini datang 🔵 |
-| **Qty_Terima** | Total unit yang berhasil diterima |
-| **Sisa_PO_Supplier** | Sisa kebutuhan yang tidak terpenuhi dari pool → harus PO |
-| **Skenario** | Kondisi distribusi SKU ini (lihat legenda) |
-| **Total Pool** | Total stok yang bisa dibagikan untuk SKU ini |
-| **Total Need** | Total kebutuhan semua cabang understock untuk SKU ini |
-        """)
-
-    # ── Init Session State ─────────────────────────────────────────────────────
-    if "donor_rules" not in st.session_state:
-        st.session_state["donor_rules"] = _default_rules()
-    if "donor_distance" not in st.session_state:
-        st.session_state["donor_distance"] = {k: list(v) for k, v in DEFAULT_DISTANCE_PRIORITY.items()}
-
-    rules    = st.session_state["donor_rules"]
-    distance = st.session_state["donor_distance"]
-
-    # ── Pengaturan Donor — di halaman utama ────────────────────────────────────
-    st.markdown("---")
-    with st.expander("⚙️ Pengaturan Donor Antar Cabang", expanded=False):
-        cfg1, cfg2 = st.tabs(["🚫 Aturan Kirim", "📍 Prioritas Jarak"])
-
-        with cfg1:
-            st.caption("✅ Centang = **BOLEH** kirim. Kosong = **TIDAK BOLEH**.")
-            cols_rule = st.columns(len(ALL_CITIES))
-            for i, dcity in enumerate(ALL_CITIES):
-                with cols_rule[i]:
-                    st.markdown(f"**{dcity}**")
-                    for rcity in ALL_CITIES:
-                        if dcity == rcity:
-                            continue
-                        key = f"rule_{dcity}_{rcity}"
-                        cur = rules.get(dcity, {}).get(rcity, True)
-                        rules[dcity][rcity] = st.checkbox(f"→ {rcity}", value=cur, key=key)
-            st.session_state["donor_rules"] = rules
-
-        with cfg2:
-            st.caption("Atur urutan prioritas donor per penerima. **Urutan 1 = paling dekat/prioritas utama.**")
-            # BARU: Surabaya ikut dimasukkan, karena sekarang Surabaya juga bisa
-            # menjadi penerima dan butuh urutan prioritas donor untuknya.
-            cities_recv = list(ALL_CITIES)
-            cols_dist = st.columns(len(cities_recv))
-            for i, rcity in enumerate(cities_recv):
-                with cols_dist[i]:
-                    st.markdown(f"**{rcity}**")
-                    cur_order = distance.get(rcity, [c for c in ALL_CITIES if c != rcity])
-                    others    = [c for c in ALL_CITIES if c != rcity]
-                    new_order = []
-                    for rank in range(len(others)):
-                        remaining = [c for c in others if c not in new_order]
-                        if not remaining:
-                            break
-                        default_choice = cur_order[rank] if rank < len(cur_order) and cur_order[rank] in remaining else remaining[0]
-                        sel = st.selectbox(
-                            f"Prioritas {rank+1}",
-                            options=remaining,
-                            index=remaining.index(default_choice),
-                            key=f"dist_{rcity}_{rank}",
-                        )
-                        new_order.append(sel)
-                    distance[rcity] = new_order
-            st.session_state["donor_distance"] = distance
-
-    rules    = st.session_state["donor_rules"]
-    distance = st.session_state["donor_distance"]
-
-    # ── Filter Produk ──────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("🔍 Filter Produk")
-    c1, c2, c3 = st.columns(3)
-    sel_kat   = c1.multiselect("Kategori Barang:", sorted(df["Kategori Barang"].dropna().unique().astype(str)), key="donor_kat")
-    sel_brand = c2.multiselect("Brand:",           sorted(df["BRAND Barang"].dropna().unique().astype(str)),    key="donor_brand")
-    sel_prod  = c3.multiselect("Nama Produk:",     sorted(df["Nama Barang"].dropna().unique().astype(str)),     key="donor_prod")
-    c4, c5    = st.columns(2)
-    sel_abc     = c4.multiselect("Kategori ABC:",  sorted(df[KAT_COL].dropna().unique().astype(str)), key="donor_abc")
-    only_active = c5.checkbox("Hanya SKU dengan aktivitas donor/terima", value=True, key="donor_active")
-
-    if sel_kat:   df = df[df["Kategori Barang"].astype(str).isin(sel_kat)]
-    if sel_brand: df = df[df["BRAND Barang"].astype(str).isin(sel_brand)]
-    if sel_prod:  df = df[df["Nama Barang"].astype(str).isin(sel_prod)]
-    if sel_abc:   df = df[df[KAT_COL].isin(sel_abc)]
-
-    # ── Hitung ────────────────────────────────────────────────────────────────
-    st.markdown("---")
-    with st.spinner("⏳ Menghitung distribusi donor..."):
-        donor_df = _run_donor_calc(df, rules, distance)
-
-    if donor_df.empty:
-        st.info("Tidak ada data untuk diproses.")
-        st.stop()
-
-    if only_active:
-        active_skus = donor_df[(donor_df["Donor_Ke"] != "-") | (donor_df["Terima_Dari"] != "-")]["No. Barang"].unique()
-        ddisp = donor_df[donor_df["No. Barang"].isin(active_skus)].copy()
-    else:
-        ddisp = donor_df.copy()
-
-    # ── Metrics ───────────────────────────────────────────────────────────────
-    st.subheader("📊 Ringkasan Hasil")
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("SKU ada donor",         donor_df[donor_df["Donor_Ke"] != "-"]["No. Barang"].nunique())
-    m2.metric("SKU menerima transfer", donor_df[donor_df["Terima_Dari"] != "-"]["No. Barang"].nunique())
-    m3.metric("Total unit didonorkan", f"{int(donor_df['Qty_Donor'].sum()):,}")
-    m4.metric("Total unit diterima",   f"{int(donor_df['Qty_Terima'].sum()):,}")
-    m5.metric("Sisa → butuh PO",       f"{int(donor_df['Sisa_PO_Supplier'].sum()):,}")
-
-    # ── Skenario counts ────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("Distribusi Skenario per SKU")
-    sku_ske = donor_df.drop_duplicates("No. Barang")["Skenario"].value_counts()
-    skcols  = st.columns(max(len(sku_ske), 1))
-    for i, (lbl, cnt) in enumerate(sku_ske.items()):
-        bg = _SKENARIO_COLOR.get(lbl, "#eee")
-        skcols[i].markdown(
-            f"<div style='background:{bg};padding:10px;border-radius:8px;text-align:center'>"
-            f"<b style='font-size:0.8em'>{lbl}</b><br>"
-            f"<span style='font-size:1.6em;font-weight:bold'>{cnt}</span> SKU</div>",
-            unsafe_allow_html=True,
+        cur.execute(
+            """INSERT INTO varian_produk_dipelajari
+               (url_produk, nama_produk, punya_varian, ada_harga_beda)
+               VALUES (%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE nama_produk=%s, punya_varian=%s, ada_harga_beda=%s""",
+            (url[:768], nama, punya_varian, ada_harga_beda,
+             nama, punya_varian, ada_harga_beda)
         )
 
-    st.markdown("---")
+        if sudah and sebelum == bool(punya_varian):
+            conn.commit()
+            return   # tidak ada perubahan, tidak perlu update skor kata
 
-    # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📋 Detail per Cabang",
-        "📦 Rekap per SKU",
-        "📊 Tabel Gabungan",
-        "🔀 Matriks Transfer",
-    ])
+        # Pecah nama jadi kata (sama seperti versi file)
+        n = nama.lower()
+        tokens = _re.findall(r'[a-z]+[0-9]*[a-z]*|[0-9]+(?:gb|tb|mb|inch|mm|cm|w|watt|ml)', n)
+        kata_list = list(set(t for t in tokens if len(t) >= 2 and not t.isdigit()))
 
-    DISP_COLS = [
-        "No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang",
-        "City", "Kategori ABC",
-        "Stock Cabang", "Min Stock", "Max Stock",
-        "Status Stock", "% Stock", "Add Stock", "Qty_Bisa_Donor",
-        "Donor_Ke", "Qty_Donor",
-        "Terima_Dari", "Qty_Terima",
-        "Sisa_PO_Supplier", "Skenario",
-    ]
-    ecols = [c for c in DISP_COLS if c in ddisp.columns]
-    FMT   = {"% Stock": "{:.1f}", "Stock Cabang": "{:.0f}", "Min Stock": "{:.0f}",
-              "Max Stock": "{:.0f}", "Add Stock": "{:.0f}", "Qty_Bisa_Donor": "{:.0f}",
-              "Qty_Donor": "{:.0f}", "Qty_Terima": "{:.0f}", "Sisa_PO_Supplier": "{:.0f}"}
-
-    # Tab 1
-    with tab1:
-        st.subheader("Detail per Cabang")
-        st.caption("🟢 Kolom **Donor_Ke** = cabang ini mengirim  |  🔵 Kolom **Terima_Dari** = cabang ini menerima")
-        for city in sorted(ddisp["City"].unique()):
-            cdf   = ddisp[ddisp["City"] == city][ecols].copy()
-            n_act = ((cdf["Donor_Ke"] != "-") | (cdf["Terima_Dari"] != "-")).sum()
-            with st.expander(f"📍 {city}  —  {n_act} SKU aktif dari {len(cdf)}", expanded=(n_act > 0)):
-                styled = cdf.style.format(FMT, na_rep="-")
-                for col in cdf.columns:
-                    if   col == "Status Stock":   styled = styled.map(highlight_status_stock,    subset=[col])
-                    elif col == "Kategori ABC":   styled = styled.map(highlight_kategori_abc_log, subset=[col])
-                    elif col == "Skenario":       styled = styled.map(_hl_ske,   subset=[col])
-                    elif col == "Donor_Ke":       styled = styled.map(_hl_donor, subset=[col])
-                    elif col == "Terima_Dari":    styled = styled.map(_hl_recv,  subset=[col])
-                st.dataframe(styled, use_container_width=True)
-
-    # Tab 2
-    with tab2:
-        st.subheader("Rekap per SKU")
-        st.caption("1 baris = 1 SKU. Lihat siapa yang kirim, siapa yang terima, dan berapa sisa yang harus PO.")
-        KEYS = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
-        rows2 = []
-        for sku, grp in ddisp.groupby("No. Barang"):
-            f    = grp.iloc[0]
-            meta = {k: f.get(k, "") for k in KEYS}
-            da   = grp[(grp["Donor_Ke"] != "-") & (grp["Qty_Donor"] > 0)]
-            ra   = grp[(grp["Terima_Dari"] != "-") & (grp["Qty_Terima"] > 0)]
-            meta.update({
-                "Skenario":          grp["Skenario"].iloc[0],
-                "Total Need":        int(grp["Total_Need"].iloc[0]),
-                "Total Pool":        int(grp["Total_Pool"].iloc[0]),
-                "Terpenuhi":         int(grp["Qty_Terima"].sum()),
-                "Sisa PO Supplier":  int(grp["Sisa_PO_Supplier"].sum()),
-                "Donor (kirim ke)":  " | ".join(f"{r['City']}→{r['Donor_Ke']} ({int(r['Qty_Donor'])} unit)" for _, r in da.iterrows()) or "-",
-                "Penerima (dari)":   " | ".join(f"{r['City']}←{r['Terima_Dari']} ({int(r['Qty_Terima'])} unit)" for _, r in ra.iterrows()) or "-",
-            })
-            rows2.append(meta)
-        df2 = pd.DataFrame(rows2)
-        if not df2.empty:
-            st.dataframe(df2.style.map(_hl_ske, subset=["Skenario"]), use_container_width=True, height=500)
-        else:
-            st.info("Tidak ada SKU aktif.")
-
-    # Tab 3: Tabel Gabungan Pivot
-    with tab3:
-        st.subheader("Tabel Gabungan — Semua Cabang dalam Satu Baris per SKU")
-        st.caption("Format mirip Tabel Gabungan di V2. Setiap baris = 1 SKU, kolom = info tiap cabang.")
-        KEYS = ["No. Barang", "Kategori Barang", "BRAND Barang", "Nama Barang"]
-        CITY_SHORT = {"BALI":"BALI","JAKARTA":"JKT","JOGJA":"JOG","MALANG":"MLG","SEMARANG":"SMG","SURABAYA":"SBY"}
-        M_COLS = ["Stock Cabang","Min Stock","Max Stock","Add Stock","Status Stock",
-                  "% Stock","Qty_Bisa_Donor","Donor_Ke","Qty_Donor","Terima_Dari","Qty_Terima","Sisa_PO_Supplier"]
-        mex = [m for m in M_COLS if m in ddisp.columns]
-
-        try:
-            piv = ddisp.pivot_table(index=KEYS, columns="City", values=mex, aggfunc="first")
-            piv.columns = [f"{CITY_SHORT.get(city,city)}_{metric}" for metric, city in piv.columns]
-            piv = piv.reset_index()
-
-            sku_agg = ddisp.groupby("No. Barang").agg(
-                All_Total_Need    = ("Total_Need",       "first"),
-                All_Total_Pool    = ("Total_Pool",       "first"),
-                All_Qty_Terima    = ("Qty_Terima",       "sum"),
-                All_Sisa_PO       = ("Sisa_PO_Supplier", "sum"),
-                All_Skenario      = ("Skenario",         "first"),
-            ).reset_index()
-            piv = piv.merge(sku_agg, on="No. Barang", how="left")
-
-            non_sby = [c for c in piv.columns if c not in KEYS and not c.startswith("SBY_") and not c.startswith("All_")]
-            sby_c   = [c for c in piv.columns if c.startswith("SBY_")]
-            all_c   = [c for c in piv.columns if c.startswith("All_")]
-            piv     = piv[KEYS + non_sby + sby_c + all_c]
-
-            for col in piv.columns:
-                if col in KEYS: continue
-                if pd.api.types.is_numeric_dtype(piv[col]):
-                    piv[col] = piv[col].fillna(0).astype(int)
+        for kata in kata_list:
+            if sudah and sebelum is not None:
+                # koreksi kontribusi lama dulu
+                if sebelum:
+                    cur.execute(
+                        "UPDATE varian_memori SET jumlah_varian = GREATEST(0, jumlah_varian-1) "
+                        "WHERE kata=%s", (kata,))
                 else:
-                    piv[col] = piv[col].fillna("-")
+                    cur.execute(
+                        "UPDATE varian_memori SET jumlah_single = GREATEST(0, jumlah_single-1) "
+                        "WHERE kata=%s", (kata,))
+            kolom = "jumlah_varian" if punya_varian else "jumlah_single"
+            cur.execute(
+                f"""INSERT INTO varian_memori (kata, {kolom}) VALUES (%s, 1)
+                    ON DUPLICATE KEY UPDATE {kolom} = {kolom} + 1""",
+                (kata,)
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
-            ccfg = {c: st.column_config.NumberColumn(format="%.0f")
-                    for c in piv.columns if c not in KEYS and pd.api.types.is_numeric_dtype(piv[c])}
 
-            style_piv = piv.style
-            if "All_Skenario" in piv.columns:
-                style_piv = style_piv.map(_hl_ske, subset=["All_Skenario"])
+def boleh_skip_produk(url):
+    """True kalau produk ini SUDAH PERNAH dipelajari dan TIDAK AKAN
+    menghasilkan info baru kalau dibuka lagi -- yaitu produk single (tidak
+    ada varian sama sekali), ATAU produk yang varian-nya cuma warna/packing
+    dengan harga sama (bukan storage/RAM/tipe yang harganya beda).
 
-            st.dataframe(style_piv, column_config=ccfg, use_container_width=True, height=500)
+    Produk dengan ada_harga_beda=True TETAP dibuka lagi tiap run -- karena
+    harga bisa berubah dari waktu ke waktu, jadi masih ada nilai info baru."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ada_harga_beda FROM varian_produk_dipelajari WHERE url_produk=%s",
+            (url[:768],)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False   # belum pernah dipelajari -- WAJIB dibuka
+        return not bool(row[0])   # sudah dipelajari & TIDAK ada harga beda -> skip
+    finally:
+        conn.close()
 
-            with st.expander("ℹ️ Keterangan singkatan kolom"):
-                st.markdown("""
-| Prefix | Cabang |
-|---|---|
-| `JKT_` | Jakarta | `SMG_` | Semarang |
-| `JOG_` | Jogja | `MLG_` | Malang |
-| `BALI_` | Bali | `SBY_` | Surabaya |
 
-| Kolom All_ | Arti |
-|---|---|
-| `All_Total_Need` | Total kebutuhan semua cabang understock (SKU ini) |
-| `All_Total_Pool` | Total stok tersedia untuk dibagi |
-| `All_Qty_Terima` | Total yang berhasil didistribusikan |
-| `All_Sisa_PO` | Total yang masih harus PO ke supplier |
-| `All_Skenario` | Skenario distribusi SKU ini |
-                """)
-        except Exception as e:
-            st.warning(f"Gagal membuat tabel gabungan: {e}")
+def url_yang_boleh_skip(daftar_url):
+    """Versi BULK dari boleh_skip_produk() -- satu query untuk banyak URL
+    sekaligus, jauh lebih cepat daripada query satu-satu per produk saat
+    mau proses ratusan produk dalam satu toko."""
+    if not daftar_url:
+        return set()
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        urls_potong = [u[:768] for u in daftar_url]
+        format_strings = ",".join(["%s"] * len(urls_potong))
+        cur.execute(
+            f"SELECT url_produk FROM varian_produk_dipelajari "
+            f"WHERE url_produk IN ({format_strings}) AND ada_harga_beda=FALSE",
+            tuple(urls_potong)
+        )
+        return set(r[0] for r in cur.fetchall())
+    finally:
+        conn.close()
 
-    # Tab 4: Matriks
-    with tab4:
-        st.subheader("🔀 Matriks Transfer Antar Cabang")
-        st.caption("Baris = pengirim | Kolom = penerima | Angka = total unit yang ditransfer")
 
-        cits   = sorted(ddisp["City"].unique())
-        matrix = pd.DataFrame(0, index=cits, columns=cits, dtype=int)
-        for _, row in ddisp.iterrows():
-            if row["Donor_Ke"] == "-" or row["Qty_Donor"] == 0:
-                continue
-            dests = [d.strip() for d in str(row["Donor_Ke"]).split(",") if d.strip()]
-            each  = int(row["Qty_Donor"]) // max(len(dests), 1)
-            for dest in dests:
-                if dest in matrix.columns:
-                    matrix.loc[row["City"], dest] += each
+def skor_nama_db(nama):
+    """Nilai kemungkinan nama ini punya varian, dari skor kata-kata di
+    database. Return (skor -1..+1, penjelasan) -- sama seperti skor_nama()
+    versi file JSON."""
+    import re as _re
+    n = nama.lower()
+    tokens = _re.findall(r'[a-z]+[0-9]*[a-z]*|[0-9]+(?:gb|tb|mb|inch|mm|cm|w|watt|ml)', n)
+    kata_list = list(set(t for t in tokens if len(t) >= 2 and not t.isdigit()))
+    if not kata_list:
+        return 0.0, "tidak ada kata dikenali"
 
-        matrix["► TOTAL KIRIM"]      = matrix.sum(axis=1)
-        matrix.loc["▼ TOTAL TERIMA"] = matrix.sum(axis=0)
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        format_strings = ",".join(["%s"] * len(kata_list))
+        cur.execute(
+            f"SELECT * FROM varian_memori WHERE kata IN ({format_strings})",
+            tuple(kata_list)
+        )
+        hasil = {r["kata"]: r for r in cur.fetchall()}
+    finally:
+        conn.close()
 
-        def _cm(v):
-            return "background-color: #cce5ff; font-weight: bold" if isinstance(v, (int, float, np.integer)) and v > 0 else ""
-        st.dataframe(matrix.style.map(_cm), use_container_width=True)
+    total, dihitung, detail = 0.0, 0, []
+    for kata in kata_list:
+        slot = hasil.get(kata)
+        if not slot:
+            continue
+        v, s = slot["jumlah_varian"], slot["jumlah_single"]
+        n_total = v + s
+        if n_total < 2:
+            continue
+        skor_kata = (v - s) / n_total
+        total += skor_kata
+        dihitung += 1
+        if abs(skor_kata) > 0.3:
+            detail.append(f"{kata}:{skor_kata:+.1f}")
 
-        st.markdown("---")
-        st.subheader("🚫 Aturan Aktif Saat Ini")
-        rule_rows = [
-            {"Pengirim": d, "Penerima": r, "Status": "✅ Boleh" if rules.get(d, {}).get(r, True) else "🚫 Tidak Boleh"}
-            for d in ALL_CITIES for r in ALL_CITIES if d != r
-        ]
-        rdf = pd.DataFrame(rule_rows)
-        tb  = rdf[rdf["Status"] == "🚫 Tidak Boleh"]
-        if tb.empty:
-            st.success("Semua rute saat ini diizinkan.")
-        else:
-            st.dataframe(tb, use_container_width=True, hide_index=True)
+    if dihitung == 0:
+        return 0.0, "belum ada data kata yang dikenal"
+    return total / dihitung, (", ".join(detail) if detail else "netral")
 
-        st.markdown("---")
-        st.subheader("📍 Prioritas Jarak Aktif Saat Ini")
-        dist_rows = []
-        for rcity in ALL_CITIES:
-            order = distance.get(rcity, [])
-            for rank, dcity in enumerate(order):
-                dist_rows.append({"Penerima": rcity, "Prioritas": rank+1, "Donor": dcity})
-        st.dataframe(pd.DataFrame(dist_rows), use_container_width=True, hide_index=True)
 
-    # ── Download ───────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("💾 Unduh Hasil Analisis Donor")
+def statistik_memori():
+    """Ringkasan memori: total produk dipelajari, jumlah kata dikenal, dll."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM varian_produk_dipelajari")
+        total_produk = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM varian_produk_dipelajari WHERE punya_varian=1")
+        total_varian = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM varian_memori")
+        total_kata = cur.fetchone()[0]
+        return {"total_dibuka": total_produk, "total_varian": total_varian,
+                "total_kata": total_kata}
+    finally:
+        conn.close()
 
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        ddisp[ecols].to_excel(writer, sheet_name="Detail per Cabang", index=False)
-        if not df2.empty:
-            df2.to_excel(writer, sheet_name="Rekap per SKU", index=False)
-        try:
-            piv.to_excel(writer, sheet_name="Tabel Gabungan", index=False)
-        except Exception:
-            pass
-        matrix.to_excel(writer, sheet_name="Matriks Transfer")
-        for city in sorted(ddisp["City"].unique()):
-            cdf = ddisp[ddisp["City"] == city][ecols]
-            if not cdf.empty:
-                cdf.to_excel(writer, sheet_name=city[:31], index=False)
 
-    st.download_button(
-        "📥 Unduh Excel — Analisis Donor",
-        data=output.getvalue(),
-        file_name="Analisis_Donor_Stock.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+def kata_teratas(urutan="desc", limit=8, minimal_data=3):
+    """Kata dengan skor tertinggi ('desc', penanda BERVARIAN) atau terendah
+    ('asc', penanda SINGLE). Untuk laporan akhir run."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            "SELECT *, (jumlah_varian - jumlah_single) / "
+            "(jumlah_varian + jumlah_single) AS skor, "
+            "(jumlah_varian + jumlah_single) AS total "
+            "FROM varian_memori HAVING total >= %s ORDER BY skor "
+            + ("DESC" if urutan == "desc" else "ASC") + f" LIMIT {int(limit)}",
+            (minimal_data,)
+        )
+        return cur.fetchall()
+    finally:
+        conn.close()
 
-    # ── Legenda ────────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("📖 Legenda Skenario")
-    lg1, lg2, lg3 = st.columns(3)
-    lg1.success("**0 - TIDAK ADA KEBUTUHAN**\nSemua cabang sudah aman.")
-    lg2.info("**2 - SBY CUKUP**\nSisa SBY cukup untuk semua.")
-    lg3.warning("**3 - SBY TERBATAS + ADA DONOR**\nSBY kurang, dibantu donor cabang.")
-    lg4, lg5, lg6 = st.columns(3)
-    lg4.warning("**4 - HANYA DONOR CABANG**\nSBY tidak bisa kirim, donor cabang aktif.")
-    lg5.error("**5 - POOL TIDAK CUKUP**\nPool ada tapi tidak cukup → sebagian PO.")
-    lg6.error("**1 - KURANG**\nTidak ada pool sama sekali → semua PO.")
+
+# ══════════════════════════════════════════════════════
+# CAPTCHA LOG
+# ══════════════════════════════════════════════════════
+
+def catat_captcha(toko, akun, jenis, url=""):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO captcha_log (toko, akun, jenis, url) VALUES (%s,%s,%s,%s)",
+            (toko, akun, jenis, url[:1000] if url else "")
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# ROLLING CLEANUP — pengganti bersihkan_data_lama.py versi file
+# ══════════════════════════════════════════════════════
+
+def hapus_data_lebih_dari(hari=7):
+    """Hapus baris produk/varian/progress/captcha_log yang tanggalnya lebih
+    tua dari 'hari' hari yang lalu. Return dict jumlah baris terhapus per
+    tabel."""
+    cutoff = (datetime.now() - timedelta(days=hari)).date()
+    conn = get_conn()
+    hasil = {}
+    try:
+        cur = conn.cursor()
+        for tabel, kolom_tanggal in [("produk", "tanggal"), ("varian", "tanggal")]:
+            cur.execute(f"DELETE FROM {tabel} WHERE {kolom_tanggal} < %s", (cutoff,))
+            hasil[tabel] = cur.rowcount
+        cur.execute("DELETE FROM captcha_log WHERE waktu < %s",
+                    (datetime.now() - timedelta(days=hari),))
+        hasil["captcha_log"] = cur.rowcount
+        conn.commit()
+        return hasil
+    finally:
+        conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# PENGGUNA — nomor WA tiap orang (1-5), untuk notifikasi personal
+# ══════════════════════════════════════════════════════
+
+def simpan_pengguna(orang_ke, nama, nomor_wa):
+    """Simpan/perbarui data satu orang (nomor WA-nya)."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO pengguna (orang_ke, nama, nomor_wa) VALUES (%s,%s,%s)
+               ON DUPLICATE KEY UPDATE nama=%s, nomor_wa=%s""",
+            (orang_ke, nama, nomor_wa, nama, nomor_wa)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ambil_pengguna(orang_ke):
+    """Ambil data satu orang. Return dict {orang_ke, nama, nomor_wa} atau
+    None kalau belum terdaftar."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM pengguna WHERE orang_ke=%s", (orang_ke,))
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def semua_pengguna():
+    """Daftar semua orang terdaftar, urut nomor."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM pengguna ORDER BY orang_ke")
+        return cur.fetchall()
+    finally:
+        conn.close()
